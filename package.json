@@ -1,0 +1,21 @@
+{
+  "name": "ai-memory-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Painel local para gerenciar o ai-memory: status, manutenção, sessões run e navegação de memórias",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "marked": "^15.0.0",
+    "node-pty": "1.0.0",
+    "ws": "^8.18.0"
+  }
+}

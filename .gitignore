@@ -1,0 +1,6 @@
+node_modules/
+.sessions.json
+.protected-pids.json
+*.log
+.zcode/
+.DS_Store
