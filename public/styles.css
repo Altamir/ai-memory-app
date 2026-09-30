@@ -157,6 +157,8 @@ html, body {
 .chip-warn { background: var(--attention-soft); color: var(--attention); }
 .chip-err { background: var(--danger-soft); color: var(--danger); }
 .chip-info { background: var(--primary-soft); color: var(--primary); }
+.chip-btn { border: 0; font-family: inherit; cursor: pointer; }
+.chip-btn:hover { filter: brightness(0.95); }
 
 .metric .metric-label {
   font-size: 10px;
@@ -345,6 +347,29 @@ textarea.field { resize: vertical; min-height: 70px; font-family: var(--mono); f
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 24px 0; }
+
+/* ---- diff de cópias de skill ---- */
+.diff {
+  background: #f7f8fa;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 6px 0;
+}
+.diff-line { display: flex; gap: 8px; padding: 0 10px; white-space: pre-wrap; word-break: break-word; }
+.diff-line.add { background: var(--success-soft); color: var(--success); }
+.diff-line.del { background: var(--danger-soft); color: var(--danger); }
+.diff-line.ctx { color: var(--muted); }
+.diff-sign { flex: 0 0 10px; user-select: none; }
+.diff-num { flex: 0 0 34px; text-align: right; color: var(--muted); user-select: none; }
+.diff-text { flex: 1 1 auto; }
+.diff-hunk + .diff-hunk { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 4px; }
+.diff-file { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.diff-file.add { color: var(--success); }
+.diff-file.del { color: var(--danger); }
 
 @media (max-width: 900px) {
   .shell {

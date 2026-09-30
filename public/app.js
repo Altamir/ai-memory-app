@@ -46,6 +46,7 @@ async function api(path, { method = 'GET', body } = {}) {
   if (!res.ok) {
     const err = new Error(data?.error || `HTTP ${res.status}`);
     if (data?.detail) err.detail = data.detail;
+    if (data?.needsForce) err.needsForce = true;
     throw err;
   }
   return data;
@@ -161,6 +162,7 @@ const TITLES = {
   mail: 'Handoffs e mensagens',
   sessions: 'Sessões run',
   memories: 'Memórias',
+  skills: 'Skills dos harnesses',
 };
 
 const VIEWS = {};
@@ -273,51 +275,114 @@ VIEWS.dashboard = async (main) => {
 };
 
 // ---------- view: manutenção ----------
+//
+// A tela é montada a partir do catálogo do servidor (server/spec.mjs):
+// escopo, efeitos colaterais, flags e confirmação vêm de lá — o frontend não
+// repete metadado nenhum, então a tela não sai de sincronia com a whitelist.
 
-const CATALOG = [
-  { group: 'Rápidos e leitura', cmds: [
-    { id: 'doctor', label: 'Doctor', desc: 'Cobertura de captura por harness nos últimos N dias.', flags: [{ key: 'sinceDays', flag: '--since-days', type: 'number', def: 30, label: 'dias' }] },
-    { id: 'curator', label: 'Curator', desc: 'Relatório rule-based sobre páginas do wiki (não escreve por padrão).', flags: [{ key: 'dryRun', type: 'bool', def: true, label: 'dry-run' }, { key: 'stage', type: 'text', label: 'stage' }] },
-    { id: 'auto-improve-report', label: 'Auto-improve report', desc: 'Telemetria read-only das revisões automáticas de sessão.', flags: [{ key: 'days', flag: '--days', type: 'number', def: 30, label: 'dias' }, { key: 'limit', flag: '--limit', type: 'number', def: 10, label: 'limite' }] },
-    { id: 'audit-contamination', label: 'Auditoria de contaminação', desc: 'Auditoria SQL read-only de conteúdo cross-project.', flags: [] },
-    { id: 'lint', label: 'Lint', desc: 'Detecta páginas stale, duplicatas e contradições (escreve wiki/_lint/report.md).', flags: [{ key: 'noLlm', flag: '--no-llm', def: true, type: 'bool', label: 'sem LLM (rápido)' }, { key: 'dryRun', flag: '--dry-run', def: true, type: 'bool', label: 'dry-run' }] },
-  ] },
-  { group: 'Ações', cmds: [
-    { id: 'forget-sweep', label: 'Forget sweep', desc: 'Sweep de retenção: expira TTLs, evicta páginas episódicas frias.', flags: [{ key: 'dryRun', flag: '--dry-run', def: true, type: 'bool', label: 'dry-run' }] },
-    { id: 'finalize-session', label: 'Finalizar sessões', desc: 'Fecha sessões abertas de agentes sem evento SessionEnd (ex.: ZCode).', flags: [{ key: 'all', flag: '--all', def: true, type: 'bool', label: 'todas' }] },
-    { id: 'embed', label: 'Embeddings', desc: 'Gera embeddings das latest pages para busca semântica.', flags: [{ key: 'dryRun', flag: '--dry-run', def: true, type: 'bool', label: 'dry-run' }, { key: 'force', flag: '--force', def: false, type: 'bool', label: 'forçar' }] },
-  ] },
-  { group: 'Pesados (podem levar minutos)', cmds: [
-    { id: 'backfill', label: 'Backfill', desc: 'Importa histórico local de harness para o store.', flags: [{ key: 'dryRun', flag: '--dry-run', def: true, type: 'bool', label: 'dry-run' }, { key: 'maxSessions', flag: '--max-sessions', type: 'number', def: 25, label: 'máx sessões' }] },
-    { id: 'bootstrap', label: 'Bootstrap', desc: 'Pré-carga de histórico via LLM (git log, README, docs).', flags: [{ key: 'dryRun', flag: '--dry-run', def: true, type: 'bool', label: 'dry-run' }] },
-    { id: 'backup', label: 'Backup', desc: 'Exporta o store inteiro como tar.gz.', flags: [{ key: 'out', flag: '-o', type: 'text', label: 'arquivo de saída (vazio = padrão)' }] },
-  ] },
+const EFFECT_CHIPS = [
+  ['readOnly', 'somente leitura', 'chip'],
+  ['writesStore', 'escreve no store', 'chip chip-info'],
+  ['deletesData', 'apaga dados', 'chip chip-err'],
+  ['blocksWrites', 'bloqueia escritas', 'chip chip-warn'],
+  ['costsTokens', 'consome tokens', 'chip chip-warn'],
+  ['touchesGit', 'git do wiki', 'chip'],
+  ['writesFile', 'escreve arquivo', 'chip'],
 ];
 
-const DANGER_CATALOG = [
-  { id: 'compact', label: 'Compact', desc: 'VACUUM + rebuild FTS. Bloqueia escritas por minutos; requer espaço livre ≈ tamanho do DB.', flags: [] },
-  { id: 'reindex', label: 'Reindex', desc: 'Rebuild do SQLite a partir do wiki/. Deve rodar com o servidor parado.', flags: [] },
-  { id: 'purge-project', label: 'Purge projeto', desc: 'Remove um projeto inteiro do store (irreversível).', flags: [{ key: 'project', flag: '--project', type: 'text', label: 'nome do projeto' }] },
-  { id: 'purge-session', label: 'Purge sessão', desc: 'Remove uma sessão e todas as observações dela (irreversível).', flags: [{ key: 'sessionId', flag: '--session-id', type: 'text', label: 'session id (UUID)' }] },
-];
+function effectChips(cmd) {
+  return EFFECT_CHIPS
+    .filter(([key]) => cmd.effects?.[key])
+    .map(([key, label, cls]) => el('span', { class: cls, text: label, title: key }));
+}
+
+/** Valor da flag como a tela enviaria (default do spec quando não informado). */
+function flagDefault(cmd, key) {
+  return (cmd.flags || []).find((f) => f.key === key)?.def;
+}
+
+/** Confirmação exigida para ESTAS opções (o spec pode exigir só fora do dry-run). */
+function confirmFor(cmd, options) {
+  if (!cmd.confirm) return null;
+  if (cmd.confirm.when) {
+    const raw = options?.[cmd.confirm.when.flag];
+    const v = raw === undefined ? flagDefault(cmd, cmd.confirm.when.flag) : raw;
+    if (v !== cmd.confirm.when.value) return null;
+  }
+  return cmd.confirm;
+}
+
+function sysLine(text) {
+  return el('div', { class: 'small muted', text });
+}
+
+/** Cabeçalho de seção de um bloco de ajuda. */
+function helpSection(title, ...children) {
+  return el('div', { class: 'stack', style: 'gap:4px' },
+    el('div', { class: 'field-label', text: title }),
+    ...children,
+  );
+}
+
+function argvBlock(lines) {
+  return el('div', { class: 'codeblock mono', text: lines.join(' ') });
+}
+
+function bullets(items) {
+  return el('ul', { class: 'small', style: 'margin:4px 0; padding-left:18px' }, ...items.map((t) => el('li', { text: t })));
+}
+
+function scopeText(cmd, scopeLabel) {
+  if (cmd.scope === 'global') {
+    return `Global: age na store INTEIRA — todos os workspaces e projetos. O seletor de escopo não muda nada aqui.`;
+  }
+  if (cmd.scopeInput === 'own-flag') {
+    return `Um projeto por execução. O campo "projeto" manda; se ficar vazio, usa o projeto do seletor de escopo (hoje: ${scopeLabel}).`;
+  }
+  return `Um projeto por execução — hoje: ${scopeLabel}. Não existe modo "todos os projetos": para varrer tudo, rode uma vez por projeto.`;
+}
 
 let activeEs = null;
+// cresce a cada "ver log"/Executar: descarta o resultado de um clique que ficou obsoleto
+let showJobSeq = 0;
 
 function stopLogStream() {
   if (activeEs) { activeEs.close(); activeEs = null; }
 }
 
-function showJob(jobId, panel, statusChip) {
+async function showJob(jobId, panel, statusChip, { scopeNote = null } = {}) {
+  // o histórico de jobs vive em memória no servidor: depois de um restart do
+  // painel o id não existe mais, e abrir o stream só falharia em silêncio
+  const seq = (showJobSeq += 1);
+  let job;
+  try {
+    job = await api(`/api/jobs/${jobId}`);
+  } catch {
+    toast('log indisponível: o painel foi reiniciado depois desta execução', 'err');
+    return;
+  }
+  // outro clique aconteceu enquanto este buscava: o último vence
+  if (seq !== showJobSeq) return;
   stopLogStream();
+  // o botão "ver log" abre o painel por aqui (ao contrário de um job novo, que
+  // já vem de um clique em Executar): sem isso o log roda num painel escondido
+  panel.style.display = '';
+  panel.dataset.onDone = 'history';
+  // job.args já começa pelo nome do comando (é o argv completo)
+  const argv = (job.args || []).length ? job.args.join(' ') : job.command;
+  panel.querySelector('[data-job-label]').textContent = [argv, scopeNote].filter(Boolean).join('   ·   ');
+
   const log = panel.querySelector('.log-panel');
   log.replaceChildren();
   log.dataset.autoscroll = 'true';
-  log.addEventListener('scroll', () => {
+  // onscroll (e não addEventListener): showJob roda a cada "ver log" e os
+  // listeners se acumulariam no mesmo elemento
+  log.onscroll = () => {
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     log.dataset.autoscroll = String(atBottom);
-  });
+  };
   statusChip.className = 'chip chip-info';
-  statusChip.textContent = 'executando…';
+  statusChip.textContent = job.status === 'running' ? 'executando…' : 'carregando log…';
 
   const es = new EventSource(`/api/jobs/${jobId}/stream`);
   activeEs = es;
@@ -355,7 +420,11 @@ async function refreshHistory(container, panel, statusChip) {
       el('td', { class: 'mono', text: j.command }),
       el('td', {}, el('span', { class: `chip ${j.status === 'ok' ? 'chip-ok' : j.status === 'running' ? 'chip-info' : j.status === 'timeout' ? 'chip-warn' : 'chip-err'}`, text: j.status })),
       el('td', { text: fmtDuration(j.durationMs) }),
-      el('td', {}, el('button', { class: 'btn btn-secondary btn-sm', text: 'ver log', onclick: () => { showJob(j.id, panel, statusChip); panel.scrollIntoView({ behavior: 'smooth' }); } })),
+      el('td', {}, el('button', { class: 'btn btn-secondary btn-sm', text: 'ver log', onclick: async () => {
+        // o painel só é revelado dentro do showJob: rolar antes não faria nada
+        await showJob(j.id, panel, statusChip);
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } })),
     ));
   }
   const table = histCard.querySelector('table');
@@ -364,75 +433,218 @@ async function refreshHistory(container, panel, statusChip) {
   )), tbody);
 }
 
-function runCommand(cmd, options, panel, statusChip, root) {
-  const doRun = (confirm) => {
-    api('/api/jobs', { method: 'POST', body: { command: cmd.id, options, confirm } })
+/** Modal de ajuda: o que o comando faz, o que ele toca e a linha de comando exata. */
+async function commandHelp(cmd, ctxInfo) {
+  const { getOptions, advancedEls } = ctxInfo;
+  const scopeLabel = ctxInfo.scopeLabel();
+  const options = getOptions();
+  const argvBox = el('div', { class: 'small muted', text: 'montando a linha de comando…' });
+  const confirmBox = el('div', { class: 'small' });
+  const body = el('div', { class: 'stack' },
+    el('div', { class: 'small', text: cmd.details || cmd.summary }),
+    helpSection('Efeitos colaterais',
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, ...effectChips(cmd)),
+      cmd.sideEffects?.length ? bullets(cmd.sideEffects) : sysLine('nenhum declarado — ainda assim, confira a linha de comando'),
+    ),
+    helpSection('Onde age (escopo)', el('div', { class: 'small', text: scopeText(cmd, scopeLabel) })),
+    helpSection('Confirmação', confirmBox),
+    helpSection('Linha de comando', argvBox, sysLine('caminhos de saída em branco recebem data/hora no momento da execução.')),
+    advancedEls.length
+      ? helpSection('Opções avançadas',
+        el('div', { class: 'stack' }, advancedEls),
+        sysLine('valores preenchidos aqui valem para o próximo "Executar".'))
+      : null,
+    sysLine(`tempo máximo: ${fmtDuration(cmd.timeoutMs)} · id: ${cmd.id}`),
+  );
+
+  const updateConfirm = () => {
+    const need = confirmFor(cmd, getOptions());
+    confirmBox.replaceChildren(...(need
+      ? [el('span', { class: 'chip chip-err', text: `digitar "${need.word}"` }),
+        el('div', { class: 'small muted', text: need.hint || 'Operação destrutiva ou bloqueante: exige digitar o nome do comando.' })]
+      : [el('span', { class: 'chip chip-ok', text: 'não exige confirmação' })]));
+  };
+  updateConfirm();
+
+  modal({
+    title: `${cmd.label} · ${cmd.id}`,
+    wide: true,
+    bodyNode: body,
+    actions: [{ label: 'Fechar' }],
+  });
+
+  try {
+    // fill: campos ainda vazios viram <placeholder> nesta linha — o Executar valida de verdade
+    const pv = await api('/api/jobs', { method: 'POST', body: { command: cmd.id, options, scope: ctxInfo.scope(), preview: true, fill: true } });
+    argvBox.replaceChildren(
+      argvBlock([`${ctxInfo.bin} --data-dir ${ctxInfo.dataDir}`, ...pv.args]),
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+        el('span', { class: 'chip', text: cmd.scope === 'global' ? 'global (toda a store)' : `projeto: ${pv.scope?.project || scopeLabel}` }),
+        cmd.timeoutMs ? el('span', { class: 'chip', text: `máx ${fmtDuration(cmd.timeoutMs)}` }) : null,
+      ),
+    );
+  } catch (err) {
+    argvBox.replaceChildren(el('div', { class: 'small', text: `não deu para montar sem preencher os campos: ${err.message}` }));
+  }
+}
+
+/** Modal de confirmação digitada, mostrando a linha de comando e os efeitos. */
+function confirmRunModal(cmd, preview, scopeLabel, onConfirm) {
+  const input = el('input', { class: 'field', placeholder: `digite "${preview.confirmWord}" para confirmar`, autocomplete: 'off' });
+  const confirmBtn = el('button', { class: 'btn btn-danger', text: 'Confirmar', disabled: true });
+  input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim() !== preview.confirmWord; });
+  confirmBtn.addEventListener('click', () => { close(); onConfirm(); });
+  const close = modal({
+    title: `Executar ${cmd.label}`,
+    bodyNode: el('div', { class: 'stack' },
+      el('div', { class: 'small', text: cmd.summary }),
+      el('div', { class: 'small muted', text: preview.confirmHint || 'Operação destrutiva ou bloqueante.' }),
+      helpSection('Escopo', el('div', { class: 'small', text: scopeText(cmd, scopeLabel) })),
+      cmd.sideEffects?.length ? helpSection('O que vai acontecer', bullets(cmd.sideEffects)) : null,
+      helpSection('Linha de comando', argvBlock(preview.args)),
+      input,
+    ),
+    actions: [confirmBtn],
+  });
+  setTimeout(() => input.focus(), 50);
+}
+
+async function runCommand(cmd, ctxInfo) {
+  const options = ctxInfo.getOptions();
+  const scope = ctxInfo.scope();
+  // o preview valida as opções (e devolve a linha exata) antes de qualquer coisa
+  let preview;
+  try {
+    preview = await api('/api/jobs', { method: 'POST', body: { command: cmd.id, options, scope, preview: true } });
+  } catch (err) {
+    toast(err.message, 'err');
+    return;
+  }
+  const start = (confirm) => {
+    api('/api/jobs', { method: 'POST', body: { command: cmd.id, options, scope, confirm } })
       .then((job) => {
-        panel.style.display = '';
-        panel.dataset.onDone = 'history';
-        panel.querySelector('[data-job-label]').textContent = job.args.join(' ');
-        showJob(job.id, panel, statusChip);
-        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const { panel, statusChip, root } = ctxInfo;
+        const target = cmd.scope === 'global' ? 'escopo global (toda a store)' : `escopo: ${ctxInfo.scopeLabel()}`;
+        showJob(job.id, panel, statusChip, { scopeNote: target })
+          .then(() => panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
         refreshHistory(root, panel, statusChip);
         toast(`job iniciado: ${job.command}`);
       })
       .catch((err) => toast(err.message, 'err'));
   };
-  if (cmd.id === 'compact' || cmd.id === 'reindex' || cmd.id === 'purge-project' || cmd.id === 'purge-session') {
-    confirmModal({
-      title: `Executar ${cmd.id}`,
-      message: `${cmd.desc}\nConfirme digitando o nome do comando. Esta operação é destrutiva ou bloqueante.`,
-      word: cmd.id,
-      danger: true,
-      onConfirm: () => doRun(cmd.id),
-    });
+  if (preview.confirmWord) {
+    confirmRunModal(cmd, preview, ctxInfo.scopeLabel(), () => start(preview.confirmWord));
   } else {
-    doRun(undefined);
+    start(undefined);
   }
 }
 
-function commandCard(cmd, panel, statusChip, root) {
+function commandCard(cmd, ctxInfo) {
   const inputs = {};
-  const flagEls = cmd.flags.map((f) => {
+  const basicEls = [];
+  const advancedEls = [];
+
+  for (const f of cmd.flags || []) {
+    const label = f.label || f.flag || f.key;
+    const hint = f.help ? el('div', { class: 'small muted', text: f.help }) : null;
+    let wrapper;
     if (f.type === 'bool') {
       const cb = el('input', { type: 'checkbox' });
-      cb.checked = f.def;
+      cb.checked = f.def === true;
       inputs[f.key] = () => cb.checked;
-      return el('label', { class: 'check' }, cb, f.label || f.flag || f.key);
-    }
-    if (f.type === 'number') {
-      const inp = el('input', { class: 'field', type: 'number', style: 'max-width:90px', value: f.def ?? '' });
+      wrapper = el('div', {}, el('label', { class: 'check' }, cb, label), hint);
+    } else if (f.type === 'number') {
+      const inp = el('input', { class: 'field', type: 'number', style: 'max-width:110px', value: f.def ?? '' });
       inputs[f.key] = () => (inp.value === '' ? undefined : Number(inp.value));
-      return el('div', {}, el('label', { class: 'field-label', text: f.label || f.flag || f.key }), inp);
+      wrapper = el('div', {}, el('label', { class: 'field-label', text: label }), inp, hint);
+    } else if (f.type === 'select') {
+      const sel = el('select', { class: 'field', style: 'max-width:220px' },
+        ...(f.def === undefined ? [el('option', { value: '', text: '…' })] : []),
+        ...(f.options || []).map((o) => el('option', { value: o, text: o })),
+      );
+      if (f.def !== undefined) sel.value = f.def;
+      inputs[f.key] = () => (sel.value === '' ? undefined : sel.value);
+      wrapper = el('div', {}, el('label', { class: 'field-label', text: label }), sel, hint);
+    } else {
+      const inp = el('input', { class: 'field', type: 'text', placeholder: f.placeholder || '', autocomplete: 'off', value: f.def ?? '' });
+      inputs[f.key] = () => (inp.value.trim() === '' ? undefined : inp.value.trim());
+      wrapper = el('div', {}, el('label', { class: 'field-label', text: label }), inp, hint);
     }
-    const inp = el('input', { class: 'field', type: 'text', placeholder: f.placeholder || '', autocomplete: 'off' });
-    inputs[f.key] = () => (inp.value.trim() === '' ? undefined : inp.value.trim());
-    return el('div', {}, el('label', { class: 'field-label', text: f.label || f.flag || f.key }), inp);
-  });
+    (f.advanced ? advancedEls : basicEls).push(wrapper);
+  }
 
-  return el(
-    'div',
-    { class: 'card stack' },
+  const getOptions = () => {
+    const options = {};
+    for (const [k, get] of Object.entries(inputs)) {
+      const v = get();
+      if (v !== undefined) options[k] = v;
+    }
+    return options;
+  };
+
+  const scopeLabel = el('span', { class: 'chip' });
+  const refreshScope = () => {
+    if (cmd.scope === 'global') {
+      scopeLabel.className = 'chip';
+      scopeLabel.textContent = 'global · toda a store';
+      scopeLabel.title = 'Age em todos os workspaces e projetos; o seletor de escopo não se aplica.';
+    } else {
+      scopeLabel.className = 'chip chip-info';
+      scopeLabel.textContent = `projeto: ${ctxInfo.scopeLabel()}`;
+      scopeLabel.title = 'Age em UM projeto por execução (veja o botão ? para detalhes).';
+    }
+  };
+  refreshScope();
+  ctxInfo.onScopeChange.push(refreshScope);
+
+  const card = el('div', { class: 'card stack' },
     el('div', { class: 'row-between' },
       el('strong', { text: cmd.label }),
-      el('span', { class: 'chip chip-info mono', text: cmd.id }),
+      el('div', { class: 'row', style: 'gap:4px' }, scopeLabel,
+        el('button', { class: 'btn btn-secondary btn-sm', text: '?', title: 'o que este comando faz, o que ele toca e a linha de comando', onclick: () => commandHelp(cmd, { ...ctxInfo, getOptions, advancedEls }) }),
+      ),
     ),
-    el('div', { class: 'small muted', text: cmd.desc }),
-    flagEls.length ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px' }, flagEls) : null,
-    el('div', {}, el('button', { class: 'btn btn-primary btn-sm', text: 'Executar', onclick: () => {
-      const options = {};
-      for (const [k, get] of Object.entries(inputs)) {
-        const v = get();
-        if (v !== undefined) options[k] = v;
-      }
-      runCommand(cmd, options, panel, statusChip, root);
-    } })),
+    el('div', { class: 'small muted mono', text: cmd.id }),
+    el('div', { class: 'small muted', text: cmd.summary }),
+    el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, ...effectChips(cmd)),
+    basicEls.length ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px; align-items:flex-end' }, basicEls) : null,
+    el('div', {}, el('button', {
+      class: `btn ${cmd.group === 'danger' ? 'btn-danger' : 'btn-primary'} btn-sm`,
+      text: 'Executar',
+      onclick: () => runCommand(cmd, { ...ctxInfo, getOptions }),
+    })),
   );
+  return card;
 }
 
 VIEWS.maintenance = async (main) => {
   const root = el('div', { class: 'stack' });
   main.append(root);
+  root.append(el('div', { class: 'empty', text: 'carregando catálogo de manutenção…' }));
+
+  let catalog;
+  try {
+    catalog = await api('/api/maintenance');
+  } catch (err) {
+    root.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro ao carregar o catálogo: ${err.message}` })));
+    return;
+  }
+  let scopes = [];
+  try {
+    scopes = (await api('/api/scopes')).scopes || [];
+  } catch {
+    scopes = [];
+  }
+  // escopo implícito: é o que a CLI resolve pela pasta do painel quando o
+  // seletor fica em "automático" — vale mostrar, não adivinhar
+  let resolved = null;
+  try {
+    resolved = await api('/api/maintenance/scope');
+  } catch (err) {
+    resolved = { error: err.message };
+  }
+
+  const state = { mode: 'auto', workspace: '', project: '', onScopeChange: [] };
 
   const statusChip = el('span', { class: 'chip', text: 'idle' });
   const panel = el(
@@ -445,28 +657,169 @@ VIEWS.maintenance = async (main) => {
     el('div', { class: 'log-panel' }),
   );
 
-  for (const section of CATALOG) {
-    root.append(
-      el('h2', { class: 'view-head', text: section.group }),
-      el('div', { class: 'grid grid-cards' }, section.cmds.map((c) => commandCard(c, panel, statusChip, root))),
-    );
+  // ---- seletor de escopo ----
+  const scopeSel = el('select', { class: 'field', style: 'max-width:340px' });
+  const wsInput = el('input', { class: 'field', style: 'max-width:180px', placeholder: 'workspace', autocomplete: 'off' });
+  const projInput = el('input', { class: 'field', style: 'max-width:220px', placeholder: 'projeto', autocomplete: 'off' });
+  const manualRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px; display:none' }, wsInput, projInput);
+  const effectiveChip = el('span', { class: 'chip chip-info' });
+
+  const resolvedLabel = resolved?.workspace && resolved?.project
+    ? `${resolved.workspace}/${resolved.project}`
+    : null;
+
+  function scopeLabelFor() {
+    if (state.mode === 'manual') {
+      const ws = state.workspace || '?';
+      const pr = state.project || '?';
+      return `${ws}/${pr} (digitado)`;
+    }
+    if (state.mode === 'pick') return `${state.workspace}/${state.project}`;
+    return resolvedLabel
+      ? `${resolvedLabel} (automático, cwd do painel)`
+      : 'projeto do cwd do painel (não resolvido)';
   }
 
-  root.append(
-    el('h2', { class: 'view-head' }, el('span', { text: 'Zona de perigo' }), el('span', { class: 'chip chip-err', text: 'requer confirmação digitada' })),
-    el('div', { class: 'grid grid-cards' }, DANGER_CATALOG.map((c) => commandCard(c, panel, statusChip, root))),
-  );
+  function currentScope() {
+    if (state.mode === 'manual') {
+      const ws = state.workspace.trim();
+      const pr = state.project.trim();
+      if (!ws && !pr) return null;
+      return { workspace: ws || null, project: pr || null };
+    }
+    if (state.mode === 'pick') return { workspace: state.workspace, project: state.project };
+    return null; // automático: deixa a CLI resolver do cwd
+  }
 
-  root.append(
-    el('div', { class: 'card stack', 'data-history': '1' },
-      el('div', { class: 'row-between' },
-        el('strong', { text: 'Execuções recentes' }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => refreshHistory(root, panel, statusChip) }),
-      ),
-      el('table', { class: 'table' }),
+  function syncEffective() {
+    const scopes2 = {
+      auto: resolvedLabel ? `automático → ${resolvedLabel}` : 'automático → resolvido pela CLI (cwd do painel)',
+      pick: `${state.workspace}/${state.project}`,
+      manual: `${state.workspace || '?'}/${state.project || '?'}`,
+    };
+    effectiveChip.textContent = `comandos por projeto: ${scopes2[state.mode]}`;
+    manualRow.style.display = state.mode === 'manual' ? '' : 'none';
+    for (const fn of state.onScopeChange) fn();
+  }
+
+  scopeSel.addEventListener('change', () => {
+    const v = scopeSel.value;
+    if (v === 'auto') { state.mode = 'auto'; state.workspace = ''; state.project = ''; }
+    else if (v === 'manual') { state.mode = 'manual'; state.workspace = ''; state.project = ''; }
+    else {
+      const [ws, pr] = v.split('/');
+      state.mode = 'pick';
+      state.workspace = ws;
+      state.project = pr;
+    }
+    syncEffective();
+  });
+  wsInput.addEventListener('input', () => { state.workspace = wsInput.value; syncEffective(); });
+  projInput.addEventListener('input', () => { state.project = projInput.value; syncEffective(); });
+
+  scopeSel.replaceChildren(
+    el('option', { value: 'auto', text: 'automático — a CLI resolve pela pasta do painel' }),
+    ...scopes.map((s) => el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}${s.path ? ` — ${s.path}` : ''}` })),
+    el('option', { value: 'manual', text: 'digitar workspace/projeto…' }),
+  );
+  syncEffective();
+
+  const ctxInfo = {
+    getOptions: () => ({}),
+    scope: currentScope,
+    scopeLabel: scopeLabelFor,
+    onScopeChange: state.onScopeChange,
+    bin: catalog.runtime?.bin || 'ai-memory',
+    dataDir: catalog.runtime?.dataDir || '',
+    root,
+    panel,
+    statusChip,
+  };
+
+  // ---- cabeçalho explicativo ----
+  const globalCmds = catalog.commands.filter((c) => c.scope === 'global');
+  const projCmds = catalog.commands.filter((c) => c.scope !== 'global');
+  const header = el('div', { class: 'card stack' },
+    el('div', { class: 'row-between' },
+      el('strong', { text: 'Como esta tela executa' }),
+      el('button', {
+        class: 'btn btn-secondary btn-sm',
+        text: '? entender a manutenção',
+        onclick: () => modal({
+          title: 'Manutenção do ai-memory — como funciona',
+          wide: true,
+          bodyNode: el('div', { class: 'stack' },
+            helpSection('Quem executa',
+              el('div', { class: 'small', text: `Cada botão roda o binário ${catalog.runtime?.bin} como um processo separado, com o data-dir ${catalog.runtime?.dataDir}, e transmite a saída ao vivo. Nada de shell: os args vêm de uma whitelist no servidor.` }),
+            ),
+            helpSection('Escopo: global ou um projeto',
+              bullets([
+                `${projCmds.length} comandos agem em UM projeto por execução (doctor, curator, lint, forget-sweep, finalize-session, embed, backfill, bootstrap, restore-page, purge-*, export-okf).`,
+                `${globalCmds.length} comandos agem na store INTEIRA — todos os workspaces e projetos (compact, reindex, backup, restore, checkpoints, commit, reset, reorg, llm-test, audit-contamination).`,
+                'Não existe "todos os projetos" num comando por projeto: para varrer tudo, rode uma vez por projeto.',
+                'No modo automático, o comando por projeto cai no projeto que a CLI deriva da pasta onde o painel foi iniciado — não é o projeto que você está navegando em Memórias.',
+              ]),
+            ),
+            helpSection('A store e o data-dir',
+              el('div', { class: 'small', text: `A store real vive no servidor ai-memory (${catalog.runtime?.serverUrl}). O data-dir acima é o lado cliente (token, config) — e é o alvo de reset/restore/reindex. Se o servidor roda em Docker, confira qual volume está montado antes de usar esses três.` }),
+            ),
+            helpSection('Rede de segurança',
+              el('div', { class: 'small', text: 'Os botões destrutivos exigem digitar o nome do comando e mostram a linha exata antes. Um Backup antes de purge/reset/reindex é sempre uma boa ideia.' }),
+            ),
+          ),
+          actions: [{ label: 'Fechar' }],
+        }),
+      }),
+    ),
+    el('div', { class: 'small muted', text: 'Os comandos por projeto usam o escopo escolhido abaixo. Os globais ignoram o seletor e avisam no próprio card.' }),
+    el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px; align-items:center' },
+      el('span', { class: 'small muted', text: 'escopo dos comandos por projeto:' }),
+      scopeSel,
+      manualRow,
+    ),
+    el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px; align-items:center' },
+      effectiveChip,
+      el('span', { class: 'small muted', text: scopes.length ? `${scopes.length} projeto(s) vinculado(s) no client-projects.json — ou digite outro` : 'nenhum projeto vinculado; use "digitar workspace/projeto" para apontar outro' }),
+    ),
+    el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+      el('span', { class: 'chip mono', text: catalog.runtime?.bin || 'ai-memory' }),
+      el('span', { class: 'chip mono', text: `--data-dir ${catalog.runtime?.dataDir || '?'}` }),
+      el('span', { class: 'chip mono', text: `store ${catalog.runtime?.serverUrl || '?'}` }),
+      resolved && resolved.error ? el('span', { class: 'chip chip-warn', text: `escopo do cwd não resolvido: ${resolved.error}` }) : null,
+      resolved && resolved.uncaptured ? el('span', { class: 'chip chip-warn', text: `${resolved.uncaptured} harness sem captura no projeto do cwd` }) : null,
     ),
   );
-  root.append(panel);
+
+  // ---- seções ----
+  const sections = el('div', { class: 'stack' });
+  const historyCard = el('div', { class: 'card stack', 'data-history': '1' },
+    el('div', { class: 'row-between' },
+      el('strong', { text: 'Execuções recentes' }),
+      el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => refreshHistory(root, panel, statusChip) }),
+    ),
+    el('table', { class: 'table' }),
+  );
+
+  const renderSections = () => {
+    state.onScopeChange.length = 0; // os closures dos cards antigos morrem com eles
+    sections.replaceChildren();
+    for (const group of catalog.groups) {
+      const cmds = catalog.commands.filter((c) => c.group === group.id);
+      if (!cmds.length) continue;
+      sections.append(
+        el('h2', { class: 'view-head' },
+          el('span', { text: group.label }),
+          el('span', { class: 'chip', text: `${cmds.length} comando${cmds.length > 1 ? 's' : ''}` }),
+        ),
+        group.hint ? el('div', { class: 'small muted', style: 'margin:-4px 0 6px', text: group.hint }) : null,
+        el('div', { class: 'grid grid-cards' }, cmds.map((c) => commandCard(c, ctxInfo))),
+      );
+    }
+    syncEffective();
+  };
+  renderSections();
+
+  root.replaceChildren(header, sections, historyCard, panel);
   await refreshHistory(root, panel, statusChip);
 };
 
@@ -1481,6 +1834,1012 @@ VIEWS.memories = async (main) => {
 
   await loadScopes();
   await runSearch();
+};
+
+// ---------- view: skills dos harnesses ----------
+
+/** Separa o frontmatter YAML do corpo do SKILL.md (block scalars incluídos). */
+function parseSkillFrontmatter(content) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content || '');
+  if (!m) return { meta: {}, body: content || '' };
+  const meta = {};
+  const lines = m[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const kv = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(lines[i]);
+    if (!kv) continue;
+    let value = kv[2].trim();
+    if (/^[>|][+-]?$/.test(value)) {
+      const folded = value.startsWith('>');
+      const parts = [];
+      i++;
+      while (i < lines.length && (/^\s/.test(lines[i]) || lines[i].trim() === '')) {
+        parts.push(lines[i].trim());
+        i++;
+      }
+      i--;
+      value = parts.filter(Boolean).join(folded ? ' ' : '\n');
+    }
+    meta[kv[1].toLowerCase()] = value.replace(/^["']+|["']+$/g, '').trim();
+  }
+  return { meta, body: content.slice(m[0].length) };
+}
+
+VIEWS.skills = async (main) => {
+  const wrap = el('div', { class: 'stack' });
+  main.append(wrap);
+
+  const state = {
+    data: null,
+    harness: 'todos',
+    query: '',
+    tab: 'globais', // globais | workspaces
+    wsParent: '',
+    wsData: null,
+    wsError: null,
+    wsLoading: false,
+    wsDetail: null,
+  };
+  const list = el('div', { class: 'stack' });
+
+  async function load() {
+    wrap.replaceChildren(el('div', { class: 'empty', text: 'carregando skills…' }));
+    try {
+      state.data = await api('/api/skills');
+    } catch (err) {
+      wrap.replaceChildren(el('div', { class: 'card' }, el('p', { text: `Erro: ${err.message}` })));
+      return;
+    }
+    renderControls();
+    renderList();
+  }
+
+  function renderControls() {
+    const data = state.data;
+    const tabs = el('div', { class: 'subtabs' },
+      el('button', {
+        class: `subtab ${state.tab === 'globais' ? 'active' : ''}`,
+        text: 'Globais',
+        onclick: () => { state.tab = 'globais'; renderControls(); renderList(); },
+      }),
+      el('button', {
+        class: `subtab ${state.tab === 'workspaces' ? 'active' : ''}`,
+        text: 'Por workspace',
+        onclick: () => {
+          state.tab = 'workspaces';
+          state.wsDetail = null;
+          if (state.wsData || state.wsLoading) { renderControls(); renderList(); }
+          else loadWorkspaces();
+        },
+      }),
+    );
+
+    const parts = [tabs];
+    if (state.tab === 'workspaces') {
+      const parentInput = el('input', {
+        class: 'field',
+        placeholder: `diretório-pai (padrão: ${data?.home ? '~/projetos' : '~/projetos'})`,
+        value: state.wsParent,
+        list: 'dir-suggestions',
+        autocomplete: 'off',
+        onkeydown: (e) => { if (e.key === 'Enter') loadWorkspaces(e.target.value.trim()); },
+      });
+      parts.push(
+        el('div', { class: 'row', style: 'flex-wrap:wrap' }, parentInput,
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'varrer', onclick: () => loadWorkspaces(parentInput.value.trim()) })),
+        el('div', { class: 'small muted', text: 'workspaces com skills de projeto (.claude, .agents, .opencode, .zcode, .grok, .kiro, .devin) — inclui projetos vinculados ao ai-memory' }),
+      );
+    } else {
+      const counts = { todos: data.skills.length };
+      for (const h of data.harnesses) counts[h.id] = data.skills.filter((s) => s.installed?.[h.id]).length;
+      const chip = (id, label) => el('button', {
+        class: `subtab ${state.harness === id ? 'active' : ''}`,
+        text: `${label} · ${counts[id] ?? 0}`,
+        onclick: () => { state.harness = id; renderControls(); renderList(); },
+      });
+      parts.push(
+        el('div', { class: 'subtabs', style: 'flex-wrap:wrap' },
+          chip('todos', 'Todos'),
+          ...data.harnesses.map((h) => chip(h.id, h.label)),
+        ),
+        el('input', {
+          class: 'field',
+          placeholder: 'buscar por nome ou descrição…',
+          value: state.query,
+          oninput: (e) => { state.query = e.target.value; renderList(); },
+        }),
+        data.managedError
+          ? el('div', { class: 'chip chip-warn', text: `catálogo gerenciado indisponível (${data.managedError}) — listando só o que está em disco` })
+          : null,
+      );
+    }
+    wrap.replaceChildren(el('div', { class: 'card stack' }, ...parts), list);
+  }
+
+  async function loadWorkspaces(parent = state.wsParent) {
+    state.wsParent = parent;
+    state.wsLoading = true;
+    state.wsError = null;
+    renderControls();
+    renderList();
+    try {
+      const q = parent ? `?parent=${encodeURIComponent(parent)}` : '';
+      state.wsData = await api(`/api/skills/workspaces${q}`);
+      state.wsLoading = false;
+    } catch (err) {
+      state.wsData = null;
+      state.wsError = err.message;
+      state.wsLoading = false;
+    }
+    renderControls();
+    renderList();
+  }
+
+  async function openWorkspace(path) {
+    state.wsDetail = { loading: true, dir: path };
+    renderList();
+    try {
+      state.wsDetail = await api(`/api/skills/workspace?dir=${encodeURIComponent(path)}`);
+    } catch (err) {
+      state.wsDetail = { error: err.message, dir: path };
+    }
+    renderList();
+  }
+
+  function sectionTitle(text) {
+    return el('div', { class: 'view-head' }, el('strong', { text }));
+  }
+
+  function locationChips(skill) {
+    return state.data.harnesses.map((h) => {
+      const locs = (skill.locations || []).filter((l) => l.harness === h.id);
+      if (!locs.length) return el('span', { class: 'chip', style: 'opacity:.4', text: h.label });
+      const ordered = [...locs.filter((l) => l.kind === 'user'), ...locs.filter((l) => l.kind !== 'user')];
+      return ordered.map((loc) => {
+        const suffix = loc.kind !== 'user' ? ` · ${loc.kind}` : '';
+        const cls = loc.outdated ? 'chip chip-warn' : (loc.kind === 'user' ? 'chip chip-ok' : 'chip chip-info');
+        return el('span', {
+          class: `${cls}`,
+          style: 'cursor:pointer',
+          text: `${h.label}${suffix}${loc.outdated ? ' · desatualizada' : ''}`,
+          title: `${loc.path} — clique para ver o SKILL.md`,
+          onclick: () => previewSkill(skill, loc),
+        });
+      });
+    }).flat();
+  }
+
+  function skillCard(skill) {
+    const copies = (skill.locations || []).length;
+    return el('div', { class: 'card stack' },
+      el('div', { class: 'row-between' },
+        el('strong', { text: skill.name }),
+        el('div', { class: 'row' },
+          skill.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
+          skill.diverged
+            ? el('button', {
+                class: 'chip chip-warn chip-btn',
+                text: 'cópias diferentes · conciliar…',
+                title: 'Mesmo nome com conteúdos diferentes entre harnesses — comparar, ver o diff e alinhar as cópias',
+                onclick: () => openReconcile(skill),
+              })
+            : null,
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'SKILL.md', onclick: () => previewSkill(skill) }),
+          copies > 1
+            ? el('button', {
+                class: 'btn btn-secondary btn-sm',
+                text: 'Cópias…',
+                title: `${copies} cópias desta skill em disco — comparar e conciliar`,
+                onclick: () => openReconcile(skill),
+              })
+            : null,
+          el('button', {
+            class: 'btn btn-primary btn-sm',
+            text: 'Instalar…',
+            disabled: !skill.installable,
+            onclick: () => openInstall(skill),
+          }),
+        ),
+      ),
+      skill.description
+        ? el('div', { class: 'small muted', text: skill.description.length > 240 ? `${skill.description.slice(0, 240)}…` : skill.description })
+        : null,
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, locationChips(skill)),
+    );
+  }
+
+  function renderList() {
+    if (state.tab === 'workspaces') renderWorkspaces();
+    else renderGlobalList();
+  }
+
+  function renderGlobalList() {
+    const data = state.data;
+    const q = state.query.trim().toLowerCase();
+    let skills = data.skills;
+    if (q) skills = skills.filter((s) => s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q));
+
+    const parts = [];
+    if (state.harness === 'todos') {
+      const managed = skills.filter((s) => s.managed);
+      const others = skills.filter((s) => !s.managed);
+      if (managed.length) parts.push(sectionTitle(`Gerenciadas do ai-memory · ${managed.length}`), ...managed.map(skillCard));
+      if (others.length) parts.push(sectionTitle(`Outras skills · ${others.length}`), ...others.map(skillCard));
+    } else {
+      const target = data.harnesses.find((h) => h.id === state.harness);
+      const here = skills.filter((s) => s.installed?.[state.harness]);
+      const missing = skills.filter((s) => !s.installed?.[state.harness] && s.installable);
+      if (here.length) parts.push(sectionTitle(`Instaladas em ${target.label} · ${here.length}`), ...here.map(skillCard));
+      if (missing.length) parts.push(sectionTitle(`Não instaladas — instaláveis em ${target.label} · ${missing.length}`), ...missing.map(skillCard));
+    }
+    list.replaceChildren(...(parts.length ? parts : [el('div', { class: 'empty', text: 'nenhuma skill encontrada' })]));
+  }
+
+  function renderWorkspaces() {
+    if (state.wsDetail) return renderWorkspaceDetail();
+    if (state.wsLoading) {
+      list.replaceChildren(el('div', { class: 'empty', text: 'varrendo workspaces…' }));
+      return;
+    }
+    if (state.wsError) {
+      list.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro: ${state.wsError}` })));
+      return;
+    }
+    const data = state.wsData;
+    if (!data) {
+      list.replaceChildren(el('div', { class: 'empty', text: 'informe um diretório-pai e clique em varrer' }));
+      return;
+    }
+    const items = data.items || [];
+    const header = el('div', { class: 'view-head' },
+      el('strong', { text: `${items.length} workspace(s) com skills de projeto` }),
+      el('span', { class: 'small muted mono', text: data.parent }),
+    );
+    if (!items.length) {
+      list.replaceChildren(header, el('div', { class: 'card empty', text: 'nenhum workspace com skills de projeto encontrado neste diretório' }));
+      return;
+    }
+    const cards = items.map((it) => el('div', { class: 'card stack clickable', title: it.path, onclick: () => openWorkspace(it.path) },
+      el('div', { class: 'row-between' },
+        el('strong', { text: it.name }),
+        el('span', { class: 'chip', text: `${it.skillCount} skill(s)` }),
+      ),
+      el('div', { class: 'small muted mono', style: 'word-break:break-all', text: it.path }),
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' },
+        it.harnesses.map((h) => el('span', { class: 'chip chip-ok', text: `${h.label} · ${h.count}` })),
+      ),
+    ));
+    list.replaceChildren(header, el('div', { class: 'grid', style: 'grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))' }, cards));
+  }
+
+  function renderWorkspaceDetail() {
+    const d = state.wsDetail;
+    const back = el('button', {
+      class: 'btn btn-secondary btn-sm',
+      text: '← todos os workspaces',
+      onclick: () => { state.wsDetail = null; renderControls(); renderList(); },
+    });
+    const parts = [el('div', { class: 'view-head' }, el('strong', { text: d.name || d.dir }), back)];
+    if (d.loading) {
+      list.replaceChildren(...parts, el('div', { class: 'empty', text: 'carregando workspace…' }));
+      return;
+    }
+    if (d.error) {
+      list.replaceChildren(...parts, el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro: ${d.error}` })));
+      return;
+    }
+    parts.push(el('div', { class: 'small muted mono', style: 'word-break:break-all', text: d.dir }));
+    const withSkills = d.harnesses.filter((h) => h.skills.length);
+    if (!withSkills.length) {
+      list.replaceChildren(...parts, el('div', { class: 'card empty', text: 'sem skills de projeto neste workspace' }));
+      return;
+    }
+    for (const h of withSkills) {
+      parts.push(sectionTitle(`${h.label} · ${h.skills.length} — ${h.root}`));
+      parts.push(el('div', { class: 'grid', style: 'grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))' },
+        h.skills.map((sk) => wsSkillCard(d, h, sk)),
+      ));
+    }
+    list.replaceChildren(...parts);
+  }
+
+  function wsSkillCard(d, h, sk) {
+    return el('div', { class: 'card stack' },
+      el('div', { class: 'row-between' },
+        el('strong', { text: sk.name }),
+        el('div', { class: 'row' },
+          sk.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
+          el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: 'SKILL.md',
+            onclick: () => openSkillViewer({
+              title: `${sk.name} · ${d.name}`,
+              managed: sk.managed,
+              sources: [{ label: `${h.label} · projeto`, title: sk.path, params: { name: sk.name, harness: h.id, ws: d.dir } }],
+            }),
+          }),
+        ),
+      ),
+      sk.description
+        ? el('div', { class: 'small muted', text: sk.description.length > 240 ? `${sk.description.slice(0, 240)}…` : sk.description })
+        : null,
+    );
+  }
+
+  /** Viewer compartilhado: SKILL.md renderizado + árvore de arquivos por fonte. */
+  async function openSkillViewer({ title, managed, diverged, sources }) {
+    let index = Math.max(0, sources.findIndex((s) => s.preferred));
+
+    const headRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' });
+    const srcRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' });
+    const treePane = el('div', { class: 'stack', style: 'gap:4px' });
+    const viewPane = el('div', { class: 'stack' });
+    let activeFile = 'SKILL.md';
+
+    modal({
+      title: `${title} · SKILL.md`,
+      wide: true,
+      bodyNode: el('div', { class: 'stack' },
+        headRow,
+        sources.length > 1 ? el('div', { class: 'small muted', text: 'cópias da skill (clique para inspecionar cada uma):' }) : null,
+        srcRow,
+        el('div', { class: 'split', style: 'grid-template-columns:280px 1fr' },
+          el('div', { class: 'stack', style: 'gap:6px; max-height:58vh; overflow:auto' },
+            el('div', { class: 'field-label', text: 'arquivos e recursos' }),
+            treePane,
+          ),
+          el('div', { class: 'stack', style: 'max-height:58vh; overflow:auto' }, viewPane),
+        ),
+      ),
+      actions: [{ label: 'Fechar' }],
+    });
+
+    headRow.replaceChildren(...[
+      managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : el('span', { class: 'chip', text: 'skill de terceiros' }),
+      diverged ? el('span', { class: 'chip chip-warn', text: 'cópias diferentes', title: 'mesmo nome, conteúdos diferentes entre harnesses' }) : null,
+    ].filter(Boolean));
+
+    const renderSrcRow = () => {
+      srcRow.replaceChildren(...sources.map((s, i) => el('button', {
+        class: `subtab ${i === index ? 'active' : ''}`,
+        text: s.label,
+        title: s.title || '',
+        onclick: () => { index = i; activeFile = 'SKILL.md'; renderSrcRow(); loadCopy(); },
+      })));
+    };
+
+    function renderMarkdownInto(pane, content) {
+      const fm = parseSkillFrontmatter(content);
+      const metaChips = Object.entries(fm.meta).filter(([k]) => k !== 'description')
+        .map(([k, v]) => el('span', { class: 'chip', text: `${k}: ${v}` }));
+      let html = null;
+      if (window.marked) {
+        try { html = marked.parse(fm.body); } catch { html = null; }
+      }
+      pane.replaceChildren(...[
+        fm.meta.description ? el('div', { class: 'small muted', text: fm.meta.description }) : null,
+        metaChips.length ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, metaChips) : null,
+        html ? el('div', { class: 'md-body', html }) : el('div', { class: 'codeblock', text: fm.body }),
+      ].filter(Boolean));
+    }
+
+    async function openFile(rel) {
+      activeFile = rel;
+      for (const row of treePane.querySelectorAll('[data-rel]')) {
+        row.classList.toggle('active', row.dataset.rel === rel);
+      }
+      viewPane.replaceChildren(el('div', { class: 'empty', text: `carregando ${rel}…` }));
+      try {
+        const q = new URLSearchParams({ ...sources[index].params, rel });
+        const file = await api(`/api/skills/file?${q}`);
+        if (file.kind === 'image') {
+          viewPane.replaceChildren(
+            el('div', { class: 'small muted mono', text: `${file.rel} · ${fmtBytes(file.size) ?? ''}` }),
+            el('img', { src: file.dataUrl, style: 'max-width:100%; border:1px solid var(--line); border-radius:var(--radius)' }),
+          );
+        } else if (file.kind === 'binary') {
+          viewPane.replaceChildren(
+            el('div', { class: 'small muted mono', text: file.rel }),
+            el('div', { class: 'chip', text: `arquivo binário · ${fmtBytes(file.size) ?? '?'}` }),
+          );
+        } else if (/\.(md|markdown)$/i.test(file.rel)) {
+          renderMarkdownInto(viewPane, file.content);
+        } else {
+          viewPane.replaceChildren(
+            el('div', { class: 'small muted mono', text: `${file.rel} · ${fmtBytes(file.size) ?? ''}` }),
+            el('div', { class: 'codeblock', style: 'max-height:52vh; overflow:auto', text: file.content }),
+          );
+        }
+      } catch (err) {
+        viewPane.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+      }
+    }
+
+    function renderTree(files) {
+      const parts = [];
+      for (const f of files) {
+        const depth = f.rel.split('/').length - 1;
+        const indent = { paddingLeft: `${8 + depth * 14}px` };
+        if (f.type === 'dir') {
+          parts.push(el('div', { class: 'small muted', style: `${indent.paddingLeft}`, text: `📁 ${f.rel.split('/').pop()}/` }));
+        } else {
+          parts.push(el('div', {
+            class: `result-item ${f.rel === activeFile ? 'active' : ''}`,
+            style: `padding:5px 8px; ${indent.paddingLeft}`,
+            'data-rel': f.rel,
+            title: f.rel,
+            onclick: () => openFile(f.rel),
+          },
+            el('div', { class: 'row-between' },
+              el('span', { class: 'small mono', text: f.rel.split('/').pop() }),
+              el('span', { class: 'small muted', text: f.kind === 'image' ? 'img' : (fmtBytes(f.size) ?? '') }),
+            ),
+          ));
+        }
+      }
+      treePane.replaceChildren(...(parts.length ? parts : [el('div', { class: 'small muted', text: 'sem arquivos listados' })]));
+    }
+
+    async function loadCopy() {
+      const src = sources[index];
+      if (src.catalog) {
+        treePane.replaceChildren(el('div', { class: 'small muted', text: 'skill só existe no catálogo do binário — instale-a num harness para ver os arquivos' }));
+        viewPane.replaceChildren(el('div', { class: 'empty', text: 'carregando do catálogo…' }));
+        try {
+          const { content } = await api(`/api/skills/content?${new URLSearchParams(src.params)}`);
+          renderMarkdownInto(viewPane, content);
+        } catch (err) {
+          viewPane.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+        }
+        return;
+      }
+      treePane.replaceChildren(el('div', { class: 'empty', text: 'carregando arquivos…' }));
+      try {
+        const { files, dir } = await api(`/api/skills/files?${new URLSearchParams(src.params)}`);
+        treePane.append(el('div', { class: 'small muted mono', style: 'word-break:break-all', text: dir }));
+        renderTree(files);
+        await openFile('SKILL.md');
+      } catch (err) {
+        treePane.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+        viewPane.replaceChildren(el('div', { class: 'empty', text: '—' }));
+      }
+    }
+
+    renderSrcRow();
+    await loadCopy();
+  }
+
+  function previewSkill(skill, initialLoc) {
+    const locs = skill.locations || [];
+    const sources = locs.map((l) => ({
+      label: `${l.harness}${l.kind !== 'user' ? ` · ${l.kind}` : ''}${l.outdated ? ' · desatualizada' : ''}`,
+      title: l.path,
+      params: { name: skill.name, harness: l.harness, kind: l.kind },
+      preferred: Boolean(initialLoc && l.harness === initialLoc.harness && l.kind === initialLoc.kind),
+    }));
+    if (!sources.length) {
+      sources.push({ label: 'catálogo gerenciado do ai-memory', catalog: true, params: { name: skill.name } });
+    }
+    openSkillViewer({ title: skill.name, managed: skill.managed, diverged: skill.diverged, sources });
+  }
+
+  /**
+   * Painel de conciliação de cópias: compara as cópias da skill, mostra o diff
+   * contra a referência escolhida e propaga a referência para as demais.
+   */
+  async function openReconcile(skill) {
+    let data;
+    try {
+      data = await api(`/api/skills/compare?name=${encodeURIComponent(skill.name)}`);
+    } catch (err) {
+      toast(err.message, 'err');
+      return;
+    }
+    const copies = data.copies || [];
+    if (!copies.length) {
+      toast(`"${skill.name}" não tem cópia em disco para comparar`, 'err');
+      return;
+    }
+
+    const sameDir = (x, y) => x.id === y.id || x.sameDirAs === y.id || y.sameDirAs === x.id;
+    const ref = () => copies.find((c) => c.id === state.refId) || copies[0];
+    /** Grupo de conteúdo majoritário, com preferência por cópia gravável. */
+    const pickDefaultRef = () => {
+      const count = new Map();
+      for (const c of copies) count.set(c.signature, (count.get(c.signature) || 0) + 1);
+      const best = Math.max(...copies.map((c) => count.get(c.signature)));
+      const group = copies.filter((c) => count.get(c.signature) === best);
+      return (group.find((c) => c.writable) || group.find((c) => c.catalog) || group[0]).id;
+    };
+    const state = {
+      refId: pickDefaultRef(),
+      targets: new Set(),
+      extras: new Set(),
+      includeResources: true,
+      removeExtra: false,
+      diff: null,
+    };
+    const resetTargets = () => {
+      const r = ref();
+      state.targets = new Set(
+        copies.filter((c) => c.writable && c.id !== r.id && !sameDir(c, r) && c.signature !== r.signature).map((c) => c.id),
+      );
+    };
+    resetTargets();
+
+    const body = el('div', { class: 'stack' });
+    let closePlan = null;
+    const statusOf = (c) => {
+      if (c.id === state.refId) return { cls: 'chip-info', text: 'referência' };
+      if (sameDir(c, ref())) return { cls: 'chip-ok', text: 'mesma pasta (symlink)' };
+      if (c.signature === ref().signature) return { cls: 'chip-ok', text: 'idêntica' };
+      if (c.skillHash && c.skillHash === ref().skillHash) return { cls: 'chip-warn', text: 'recursos diferem' };
+      return { cls: 'chip-warn', text: 'SKILL.md difere' };
+    };
+
+    function peekCopy(c) {
+      if (c.catalog) {
+        openSkillViewer({
+          title: skill.name,
+          managed: true,
+          sources: [{ label: 'catálogo gerenciado do ai-memory', catalog: true, params: { name: skill.name } }],
+        });
+        return;
+      }
+      openSkillViewer({
+        title: skill.name,
+        managed: c.managed,
+        sources: [{ label: c.label, title: c.path, params: { name: skill.name, harness: c.harness, kind: c.kind } }],
+      });
+    }
+
+    async function toggleDiff(c) {
+      if (state.diff?.id === c.id) {
+        state.diff = null;
+        render();
+        return;
+      }
+      state.diff = { id: c.id, loading: true };
+      render();
+      try {
+        const q = new URLSearchParams({ name: skill.name, a: state.refId, b: c.id });
+        state.diff = { id: c.id, data: await api(`/api/skills/diff?${q}`) };
+      } catch (err) {
+        state.diff = { id: c.id, error: err.message };
+      }
+      render();
+    }
+
+    function diffPane(c) {
+      const d = state.diff;
+      if (d.error) return el('div', { class: 'chip chip-err', text: d.error });
+      if (d.loading) return el('div', { class: 'small muted', text: 'comparando…' });
+      const out = d.data;
+      const parts = [el('div', { class: 'small muted', text: `SKILL.md · ${out.a.label} → ${out.b.label}` })];
+      if (out.diff.truncated) parts.push(el('span', { class: 'chip chip-warn', text: 'diff truncado' }));
+      if (out.diff.coarse) parts.push(el('span', { class: 'chip chip-warn', text: 'arquivo grande: comparação por blocos' }));
+      if (out.diff.hunks.length) {
+        const box = el('div', { class: 'diff' });
+        for (const h of out.diff.hunks) {
+          const hunk = el('div', { class: 'diff-hunk' });
+          for (const l of h.lines) {
+            hunk.append(el('div', { class: `diff-line ${l.type}` },
+              el('span', { class: 'diff-sign', text: l.type === 'add' ? '+' : l.type === 'del' ? '-' : ' ' }),
+              el('span', { class: 'diff-num', text: String(l.type === 'add' ? l.b : l.a ?? '') }),
+              el('span', { class: 'diff-text', text: l.text }),
+            ));
+          }
+          box.append(hunk);
+        }
+        parts.push(box);
+      } else {
+        parts.push(el('span', { class: 'chip chip-ok', text: 'SKILL.md igual' }));
+      }
+      const changed = out.files.filter((f) => f.status !== 'same');
+      if (changed.length) {
+        parts.push(el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          ...changed.map((f) => el('span', {
+            class: `diff-file ${f.status === 'differs' ? '' : f.status === 'only-a' ? 'add' : 'del'}`,
+            text: `${f.status === 'differs' ? '≠ ' : f.status === 'only-a' ? '+ ' : '- '}${f.rel}`,
+          })),
+        ));
+      } else {
+        parts.push(el('div', { class: 'small muted', text: `${out.sameFiles} arquivo(s) iguais, SKILL.md incluído` }));
+      }
+      return el('div', { class: 'stack', style: 'gap:6px' }, ...parts);
+    }
+
+    function copyRow(c) {
+      const st = statusOf(c);
+      const isRef = c.id === state.refId;
+      const readOnly = !c.writable;
+      return el('div', { class: 'card stack', style: `padding:10px; gap:6px${isRef ? '; border-color:var(--primary)' : ''}` },
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:10px' },
+          el('label', { class: 'check', title: 'usar esta cópia como referência' },
+            el('input', {
+              type: 'radio',
+              name: 'skill-ref',
+              checked: isRef,
+              onchange: () => { state.refId = c.id; state.diff = null; resetTargets(); render(); },
+            }),
+            el('span', { text: 'referência' }),
+          ),
+          el('label', {
+            class: 'check',
+            title: readOnly ? 'cópia somente leitura (bundled/plugin/catálogo): serve como origem, não como destino' : 'alinhar esta cópia com a referência',
+          },
+            el('input', {
+              type: 'checkbox',
+              checked: state.targets.has(c.id),
+              disabled: readOnly || isRef,
+              onchange: (e) => {
+                if (e.target.checked) state.targets.add(c.id);
+                else state.targets.delete(c.id);
+                refreshSummary();
+              },
+            }),
+            el('span', { text: 'conciliar' }),
+          ),
+          el('strong', { text: c.label }),
+          el('span', { class: st.cls, text: st.text }),
+          c.catalog ? el('span', { class: 'chip chip-info', text: 'catálogo do binário' }) : null,
+          c.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
+          c.outdated ? el('span', { class: 'chip chip-warn', text: 'desatualizada' }) : null,
+          c.sameDirAs ? el('span', { class: 'chip', text: `symlink de ${c.sameDirAs}` }) : null,
+        ),
+        el('div', { class: 'small muted mono', style: 'word-break:break-all', text: c.dir || '(só no catálogo do ai-memory)' }),
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' },
+          el('span', { class: 'small muted', text: `${c.fileCount} arquivo(s)` }),
+          c.mtime ? el('span', { class: 'small muted', text: `atualizada ${timeAgo(c.mtime)}` }) : null,
+          c.skillHash ? el('span', { class: 'small muted mono', text: c.skillHash.slice(0, 8) }) : null,
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver cópia', onclick: () => peekCopy(c) }),
+          isRef ? null : el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: state.diff?.id === c.id ? 'ocultar diff' : 'diff',
+            onclick: () => toggleDiff(c),
+          }),
+        ),
+        ...(state.diff?.id === c.id ? [diffPane(c)] : []),
+      );
+    }
+
+    const summaryLine = el('div', { class: 'small muted' });
+    function summaryText() {
+      const ids = [...state.targets, ...state.extras];
+      if (!ids.length) return 'nenhum destino marcado — marque as cópias que devem ficar iguais à referência.';
+      const names = ids.map((id) => {
+        const c = copies.find((x) => x.id === id);
+        if (!c) return id.replace(':user', '');
+        return `${c.label}${statusOf(c).text === 'idêntica' ? ' (já igual)' : ''}`;
+      });
+      return `destinos: ${names.join(', ')}`;
+    }
+    function refreshSummary() {
+      summaryLine.textContent = summaryText();
+      reconcileBtn.disabled = !(state.targets.size + state.extras.size);
+    }
+
+    function render() {
+      const r = ref();
+      const semCopia = (data.harnesses || []).filter((h) => h.writable && !h.hasCopy);
+      body.replaceChildren(...[
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('span', { class: 'chip chip-info', text: `${copies.length} cópia(s) em disco` }),
+          data.catalogError
+            ? el('span', { class: 'chip chip-warn', text: 'catálogo gerenciado indisponível', title: data.catalogError })
+            : null,
+        ),
+        el('div', { class: 'small muted', text: 'Escolha a referência e marque as cópias que devem ficar iguais a ela. O diff mostra o que muda antes de gravar.' }),
+        el('div', { class: 'stack', style: 'gap:8px' }, ...copies.map(copyRow)),
+        el('div', { class: 'card stack', style: 'padding:10px; gap:6px' },
+          el('div', { class: 'field-label', text: 'opções da cópia' }),
+          el('label', { class: 'check' },
+            el('input', {
+              type: 'checkbox',
+              checked: state.includeResources,
+              onchange: (e) => { state.includeResources = e.target.checked; refreshSummary(); },
+            }),
+            el('span', { text: 'copiar também os arquivos de recursos (scripts, references, assets…)' }),
+          ),
+          r.catalog ? el('div', { class: 'small muted', text: 'a referência é o catálogo do binário: ele carrega só o SKILL.md — recursos e arquivos a mais no destino não são mexidos' }) : null,
+          el('label', { class: 'check', title: r.catalog ? 'indisponível com o catálogo como referência: ele não tem inventário de recursos' : '' },
+            el('input', {
+              type: 'checkbox',
+              checked: state.removeExtra && !r.catalog,
+              disabled: Boolean(r.catalog),
+              onchange: (e) => { state.removeExtra = e.target.checked; refreshSummary(); },
+            }),
+            el('span', { text: 'remover arquivos que só existem no destino (vão para o backup)' }),
+          ),
+        ),
+        semCopia.length
+          ? el('div', { class: 'card stack', style: 'padding:10px; gap:6px' },
+              el('div', { class: 'field-label', text: 'harnesses sem cópia' }),
+              el('div', { class: 'small muted', text: 'opcional: aplicar a referência também nestes roots (a skill é criada lá)' }),
+              el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px' },
+                ...semCopia.map((h) => el('label', { class: 'check', title: h.root },
+                  el('input', {
+                    type: 'checkbox',
+                    checked: state.extras.has(`${h.id}:user`),
+                    onchange: (e) => {
+                      if (e.target.checked) state.extras.add(`${h.id}:user`);
+                      else state.extras.delete(`${h.id}:user`);
+                      refreshSummary();
+                    },
+                  }),
+                  el('span', { text: h.label }),
+                  el('span', { class: 'small muted mono', text: h.root }),
+                )),
+              ),
+            )
+          : null,
+        summaryLine,
+      ]);
+      refreshSummary();
+    }
+
+    /** Plano (dry-run) antes de gravar: mostra arquivo por arquivo e o backup. */
+    function showPlan(plan) {
+      const pendencias = plan.summary.needsConfirm
+        ? el('div', { class: 'chip chip-err', text: 'há sobrescrita de cópia sem o marker gerenciado ou remoção de arquivos' })
+        : null;
+      const rows = plan.plan.map((p) => {
+        if (p.skipped) {
+          return el('div', { class: 'card row', style: 'padding:10px; flex-wrap:wrap; gap:6px' },
+            el('strong', { text: p.label }),
+            el('span', { class: 'chip', text: 'ignorada' }),
+            el('span', { class: 'small muted', text: p.skipped }),
+          );
+        }
+        const nada = !p.create.length && !p.overwrite.length && !p.remove.length;
+        return el('div', { class: 'card stack', style: 'padding:10px; gap:6px' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('strong', { text: p.label }),
+            el('span', {
+              class: `chip ${nada ? 'chip-ok' : p.existing ? 'chip-warn' : 'chip-info'}`,
+              text: nada ? 'sem mudanças' : p.existing ? 'atualiza' : 'cria',
+            }),
+            p.foreignOverwrite ? el('span', { class: 'chip chip-err', text: 'sem marker gerenciado' }) : null,
+            nada ? el('span', { class: 'chip chip-ok', text: 'já está igual' }) : null,
+          ),
+          el('div', { class: 'small muted mono', style: 'word-break:break-all', text: p.dir }),
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            p.create.length ? el('span', { class: 'chip chip-ok', text: `${p.create.length} arquivo(s) novo(s)` }) : null,
+            p.overwrite.length ? el('span', { class: 'chip chip-warn', text: `${p.overwrite.length} sobrescrito(s)` }) : null,
+            p.remove.length ? el('span', { class: 'chip chip-err', text: `${p.remove.length} removido(s)` }) : null,
+            p.extra.length && !p.remove.length ? el('span', { class: 'chip', text: `${p.extra.length} a mais (mantidos)` }) : null,
+            p.same.length ? el('span', { class: 'chip', text: `${p.same.length} arquivo(s) igual(is)` }) : null,
+          ),
+          p.remove.length ? el('div', { class: 'small muted mono', text: `remover: ${p.remove.join(', ')}` }) : null,
+          p.kept?.length ? el('div', { class: 'small muted mono', text: `backup preservado: ${p.kept.join(', ')}` }) : null,
+        );
+      });
+
+      const runBtn = el('button', {
+        class: `btn ${plan.summary.needsConfirm ? 'btn-danger' : 'btn-primary'}`,
+        text: 'Executar',
+        onclick: () => {
+          if (!plan.summary.needsConfirm) {
+            execute(plan);
+            return;
+          }
+          confirmModal({
+            title: 'Confirmar conciliação',
+            message: `Conciliação de "${skill.name}" a partir de ${plan.source.label}:\n`
+              + `${plan.summary.filesToWrite} arquivo(s) escrito(s) em ${plan.summary.destinations} destino(s)`
+              + `${plan.summary.filesToRemove ? `, ${plan.summary.filesToRemove} removido(s)` : ''}.\n`
+              + `O estado anterior de cada destino é copiado para ${plan.backupRoot}.`,
+            word: 'conciliar',
+            danger: true,
+            onConfirm: () => execute(plan),
+          });
+        },
+      });
+      closePlan = modal({
+        title: `Conciliar "${skill.name}"`,
+        wide: true,
+        bodyNode: el('div', { class: 'stack' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('span', { class: 'chip chip-info', text: `origem: ${plan.source.label}` }),
+            el('span', { class: 'small muted', text: `${plan.summary.destinations} destino(s) · ${plan.summary.filesToWrite} arquivo(s)` }),
+            pendencias,
+          ),
+          ...rows,
+          el('div', { class: 'small muted', text: `backup do estado anterior em ${plan.backupRoot}` }),
+        ),
+        actions: [{ label: 'Cancelar' }, runBtn],
+      });
+      return closePlan;
+    }
+
+    async function execute(plan) {
+      const targets = plan.plan.filter((p) => !p.skipped).map((p) => p.id);
+      closePlan?.(); // o plano já cumpriu o papel: os resultados substituem o modal
+      closePlan = null;
+      let out;
+      try {
+        out = await api('/api/skills/reconcile', {
+          method: 'POST',
+          body: {
+            name: skill.name,
+            source: plan.source.id,
+            targets,
+            includeResources: plan.includeResources,
+            removeExtra: plan.removeExtra,
+            confirm: plan.summary.needsConfirm ? 'conciliar' : undefined,
+          },
+        });
+      } catch (err) {
+        toast(err.message, 'err');
+        return;
+      }
+      showResults(out);
+      load();
+    }
+
+    function showResults(out) {
+      const errs = out.results.filter((r) => r.status === 'erro');
+      modal({
+        title: `Conciliação de "${skill.name}"`,
+        wide: true,
+        bodyNode: el('div', { class: 'stack' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('span', {
+              class: `chip ${errs.length ? 'chip-err' : 'chip-ok'}`,
+              text: errs.length ? `${errs.length} erro(s)` : 'concluída',
+            }),
+            el('span', { class: 'small muted', text: `origem: ${out.source.label}` }),
+          ),
+          ...out.results.map((r) => el('div', { class: 'card stack', style: 'padding:10px; gap:6px' },
+            el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+              el('strong', { text: r.label || r.id }),
+              el('span', { class: `chip ${r.status === 'erro' ? 'chip-err' : r.status === 'ignorada' ? '' : 'chip-ok'}`, text: r.status }),
+            ),
+            r.dir ? el('div', { class: 'small muted mono', style: 'word-break:break-all', text: r.dir }) : null,
+            r.error ? el('div', { class: 'small', style: 'color:var(--danger)', text: r.error }) : null,
+            r.wrote?.length ? el('div', { class: 'small muted', text: `novos: ${r.wrote.join(', ')}` }) : null,
+            r.overwritten?.length ? el('div', { class: 'small muted', text: `sobrescritos: ${r.overwritten.join(', ')}` }) : null,
+            r.removed?.length ? el('div', { class: 'small muted', text: `removidos: ${r.removed.join(', ')}` }) : null,
+            r.backup ? el('div', { class: 'small muted', text: `backup: ${r.backup}` }) : null,
+          )),
+        ),
+        actions: [{ label: 'Fechar', kind: 'primary' }],
+      });
+      toast(errs.length ? 'conciliação terminou com erros' : 'cópias conciliadas', errs.length ? 'err' : 'ok');
+    }
+
+    async function runDry() {
+      const targets = [...state.targets, ...state.extras];
+      if (!targets.length) {
+        toast('marque ao menos uma cópia de destino', 'err');
+        return;
+      }
+      let plan;
+      try {
+        plan = await api('/api/skills/reconcile', {
+          method: 'POST',
+          body: {
+            name: skill.name,
+            source: state.refId,
+            targets,
+            includeResources: state.includeResources,
+            removeExtra: state.removeExtra,
+            dryRun: true,
+          },
+        });
+      } catch (err) {
+        toast(err.message, 'err');
+        return;
+      }
+      closeFn?.();
+      showPlan(plan);
+    }
+
+    const reconcileBtn = el('button', {
+      class: 'btn btn-primary',
+      text: 'Conciliar…',
+      disabled: !(state.targets.size + state.extras.size),
+      onclick: () => runDry(),
+    });
+
+    const closeFn = modal({
+      title: `Cópias de "${skill.name}"`,
+      wide: true,
+      bodyNode: body,
+      actions: [{ label: 'Fechar' }, reconcileBtn],
+    });
+    render();
+  }
+
+  function openInstall(skill) {
+    const targets = state.data.harnesses;
+    const sel = el('select', { class: 'field' }, targets.map((h) => el('option', { value: h.id, text: h.label })));
+    if (state.harness !== 'todos') sel.value = state.harness;
+
+    const rbGlobal = el('input', { type: 'radio', name: 'skill-scope', value: 'global', checked: true });
+    const rbProject = el('input', { type: 'radio', name: 'skill-scope', value: 'project' });
+    const dirInput = el('input', {
+      class: 'field',
+      placeholder: 'diretório do projeto (ex.: ~/projetos/meu-app)',
+      list: 'dir-suggestions',
+      autocomplete: 'off',
+      disabled: true,
+    });
+    const syncScope = () => { dirInput.disabled = !rbProject.checked; };
+    rbGlobal.addEventListener('change', syncScope);
+    rbProject.addEventListener('change', syncScope);
+
+    const src = (skill.locations || []).find((l) => l.kind === 'user');
+    const sourceText = skill.managed && !src
+      ? 'conteúdo: catálogo gerenciado do ai-memory'
+      : skill.managed
+        ? `conteúdo: catálogo gerenciado do ai-memory (também existe em ${src.path})`
+        : `conteúdo: cópia de ${src.path}`;
+    const warn = el('div', { class: 'small', style: 'display:none; color: var(--attention); white-space:pre-wrap' });
+    let forceMode = false;
+    let closeFn = null;
+
+    const run = (force) => {
+      const payload = { name: skill.name, harness: sel.value, scope: rbProject.checked ? 'project' : 'global', force };
+      if (payload.scope === 'project') {
+        if (!dirInput.value.trim()) {
+          toast('informe o diretório do projeto', 'err');
+          return;
+        }
+        payload.projectDir = dirInput.value.trim();
+      }
+      api('/api/skills/install', { method: 'POST', body: payload })
+        .then((out) => {
+          closeFn?.();
+          toast(`skill instalada em ${out.path}`, 'ok');
+          load();
+        })
+        .catch((err) => {
+          if (err.needsForce) {
+            forceMode = true;
+            warn.style.display = '';
+            warn.textContent = err.message;
+            installBtn.textContent = 'Forçar instalação…';
+          } else {
+            toast(err.message, 'err');
+          }
+        });
+    };
+
+    const installBtn = el('button', {
+      class: 'btn btn-primary',
+      text: 'Instalar',
+      onclick: () => {
+        if (forceMode) {
+          confirmModal({
+            title: 'Forçar instalação',
+            message: `"${skill.name}" já existe no destino sem o marker gerenciado e será sobrescrita (será criado um backup .bak-*). Continuar?`,
+            word: 'instalar',
+            onConfirm: () => run(true),
+          });
+        } else {
+          run(false);
+        }
+      },
+    });
+
+    closeFn = modal({
+      title: `Instalar "${skill.name}"`,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'field-label', text: 'Harness de destino' }),
+        sel,
+        el('div', { class: 'row', style: 'gap:16px' },
+          el('label', { class: 'check', style: 'display:flex; gap:6px; align-items:center' }, rbGlobal, 'Global (~ do harness)'),
+          el('label', { class: 'check', style: 'display:flex; gap:6px; align-items:center' }, rbProject, 'Projeto'),
+        ),
+        dirInput,
+        el('div', { class: 'small muted', text: sourceText }),
+        warn,
+      ),
+      actions: [{ label: 'Cancelar' }, installBtn],
+    });
+  }
+
+  await load();
 };
 
 // ---------- init ----------

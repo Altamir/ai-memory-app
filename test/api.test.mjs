@@ -71,11 +71,82 @@ test('POST /api/jobs rejeita comando fora da whitelist', async () => {
   const res = await fetch(`${BASE}/api/jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command: 'reset', options: {} }),
+    body: JSON.stringify({ command: 'uninstall', options: {} }),
   });
   assert.equal(res.status, 400);
   const data = await res.json();
   assert.match(data.error, /não permitido/);
+});
+
+test('GET /api/maintenance devolve o catálogo completo para a tela', async () => {
+  const res = await fetch(`${BASE}/api/maintenance`);
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.ok(Array.isArray(data.commands) && data.commands.length > 15);
+  assert.ok(data.groups.some((g) => g.id === 'recovery'));
+  assert.ok(data.scopes.global && data.scopes.project);
+  assert.ok(data.runtime.bin && data.runtime.dataDir);
+  const lint = data.commands.find((c) => c.id === 'lint');
+  assert.equal(lint.scope, 'project');
+  assert.equal(lint.scopeInput, 'selector');
+  assert.ok(lint.sideEffects.length > 0);
+  assert.ok(lint.flags.some((f) => f.key === 'dryRun'));
+  // a tela usa isso para o badge de escopo, os efeitos e a confirmação
+  assert.equal(data.commands.find((c) => c.id === 'compact').scope, 'global');
+  assert.equal(data.commands.find((c) => c.id === 'purge-project').scopeInput, 'own-flag');
+  assert.equal(data.commands.find((c) => c.id === 'reset').effects.deletesData, true);
+  assert.equal(data.commands.find((c) => c.id === 'restore').confirm.word, 'restore');
+});
+
+test('POST /api/jobs preview monta a linha de comando sem executar', async () => {
+  const res = await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'lint', options: {}, scope: { workspace: 'default', project: 'zz-workspace' }, preview: true }),
+  });
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.preview, true);
+  assert.deepEqual(data.args, ['lint', '--workspace', 'default', '--project', 'zz-workspace', '--no-llm', '--dry-run']);
+  assert.deepEqual(data.scope, { workspace: 'default', project: 'zz-workspace' });
+  assert.equal(data.confirmWord, null);
+
+  // preview de destrutivo já traz a palavra que a tela vai pedir
+  const danger = await (await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'purge-project', options: { project: 'scratch' }, preview: true }),
+  })).json();
+  assert.equal(danger.confirmWord, 'purge-project');
+  assert.deepEqual(danger.args, ['purge-project', '--project', 'scratch', '--confirm']);
+
+  // preview também valida: campo obrigatório faltando dá 400, sem criar job
+  const bad = await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'restore-page', options: {}, preview: true }),
+  });
+  assert.equal(bad.status, 400);
+});
+
+test('POST /api/jobs leva o escopo escolhido para a linha de comando', async () => {
+  const created = await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'forget-sweep', options: { dryRun: true }, scope: { workspace: 'default', project: 'zz-workspace' } }),
+  });
+  assert.equal(created.status, 201);
+  const job = await created.json();
+  assert.deepEqual(job.args, ['forget-sweep', '--workspace', 'default', '--project', 'zz-workspace', '--dry-run']);
+  assert.deepEqual(job.scope, { workspace: 'default', project: 'zz-workspace' });
+
+  // comando global ignora o escopo, mesmo enviado
+  const global = await (await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'checkpoints', options: {}, scope: { workspace: 'default', project: 'zz-workspace' } }),
+  })).json();
+  assert.deepEqual(global.args, ['checkpoints']);
 });
 
 test('POST /api/jobs exige confirmação digitada para compact', async () => {
@@ -87,6 +158,23 @@ test('POST /api/jobs exige confirmação digitada para compact', async () => {
   assert.equal(res.status, 400);
   const data = await res.json();
   assert.match(data.error, /confirmação/);
+});
+
+test('POST /api/jobs só exige a palavra do reorg fora do dry-run', async () => {
+  const dry = await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'reorg', options: { dryRun: true } }),
+  });
+  assert.equal(dry.status, 201);
+
+  const real = await fetch(`${BASE}/api/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'reorg', options: { dryRun: false } }),
+  });
+  assert.equal(real.status, 400);
+  assert.match((await real.json()).error, /confirmação/);
 });
 
 test('POST /api/jobs executa job (binário de teste) e history registra', async () => {

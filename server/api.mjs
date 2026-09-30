@@ -3,10 +3,12 @@ import { runCliJson, runCli, stderrMessage } from './cli.mjs';
 import { recentPages, readPage, searchMemory, listScopes } from './reads.mjs';
 import { callTool } from './mcp.mjs';
 import { createJob, getJob, jobDetail, listJobs, subscribe } from './jobs.mjs';
-import { buildMaintenanceArgs, checkConfirmation, SPEC } from './spec.mjs';
+import { buildMaintenanceArgs, checkConfirmation, commandCatalog, previewArgs, confirmationFor, SPEC } from './spec.mjs';
+import { config } from './config.mjs';
 import { createSession, getSession, killSession, listSessions, removeSession, revealSession, runningSessionPids } from './pty.mjs';
 import { listHostSessions, isHostRunProcess, isProtectedPid } from './host-sessions.mjs';
 import { listDirs } from './dirs.mjs';
+import { listSkills, getSkillContent, installSkill, listSkillFiles, readSkillFile, listWorkspaces, getWorkspaceSkills, compareSkillCopies, diffSkillCopies, reconcileSkillCopies, RECONCILE_CONFIRM } from './skills.mjs';
 import { expandTilde } from './config.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -132,6 +134,35 @@ async function retomarHostSession(pid) {
 
 const home = os.homedir();
 
+/** Escopo vindo do seletor do painel: { workspace, project } ou null. */
+function normalizeScope(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : null);
+  const workspace = clean(raw.workspace);
+  const project = clean(raw.project);
+  if (!workspace && !project) return null;
+  return { workspace, project };
+}
+
+// A CLI resolve o escopo dos comandos por projeto a partir do cwd. O painel
+// roda os jobs herdando o próprio cwd, então este é o alvo implícito quando o
+// usuário não escolhe nada — vale mostrar na tela em vez de adivinhar.
+let cwdScopeCache = { at: 0, value: null };
+
+async function resolveCwdScope() {
+  const now = Date.now();
+  if (cwdScopeCache.value && now - cwdScopeCache.at < 15_000) return cwdScopeCache.value;
+  const data = await runCliJson(['doctor'], { timeoutMs: 60_000 });
+  const value = {
+    workspace: typeof data?.workspace === 'string' ? data.workspace : null,
+    project: typeof data?.project === 'string' ? data.project : null,
+    uncaptured: Array.isArray(data?.uncaptured) ? data.uncaptured.length : null,
+    source: 'doctor (cwd do painel)',
+  };
+  cwdScopeCache = { at: now, value };
+  return value;
+}
+
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -203,22 +234,162 @@ export async function handleApi(req, res, url) {
       return json(res, 200, out);
     }
 
+    // ---- skills dos harnesses ----
+    // home é resolvido dentro de skills.mjs (AI_MEMORY_SKILLS_HOME permite isolar em testes)
+    if (route === 'GET /api/skills') {
+      try {
+        return json(res, 200, await listSkills());
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/content') {
+      try {
+        return json(res, 200, await getSkillContent({
+          name: url.searchParams.get('name') || '',
+          harness: url.searchParams.get('harness') || undefined,
+          kind: url.searchParams.get('kind') || undefined,
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/workspaces') {
+      try {
+        return json(res, 200, listWorkspaces({ parent: url.searchParams.get('parent') || undefined }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/workspace') {
+      try {
+        return json(res, 200, getWorkspaceSkills({ dir: url.searchParams.get('dir') || '' }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/files') {
+      try {
+        return json(res, 200, listSkillFiles({
+          name: url.searchParams.get('name') || '',
+          harness: url.searchParams.get('harness') || undefined,
+          kind: url.searchParams.get('kind') || undefined,
+          ws: url.searchParams.get('ws') || undefined,
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/file') {
+      try {
+        return json(res, 200, readSkillFile({
+          name: url.searchParams.get('name') || '',
+          harness: url.searchParams.get('harness') || undefined,
+          kind: url.searchParams.get('kind') || undefined,
+          ws: url.searchParams.get('ws') || undefined,
+          rel: url.searchParams.get('rel') || undefined,
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/compare') {
+      try {
+        return json(res, 200, await compareSkillCopies({ name: url.searchParams.get('name') || '' }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/skills/diff') {
+      try {
+        return json(res, 200, await diffSkillCopies({
+          name: url.searchParams.get('name') || '',
+          a: url.searchParams.get('a') || '',
+          b: url.searchParams.get('b') || '',
+          context: Number(url.searchParams.get('context')) || 3,
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/skills/reconcile') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await reconcileSkillCopies({
+          name: String(body.name || ''),
+          source: body.source ?? '',
+          targets: Array.isArray(body.targets) ? body.targets : [],
+          includeResources: body.includeResources !== false,
+          removeExtra: body.removeExtra === true,
+          dryRun: body.dryRun === true,
+          confirm: body.confirm,
+        });
+        return json(res, 200, out);
+      } catch (err) {
+        if (err.code === 'NEEDS_CONFIRM') {
+          return json(res, 409, { error: err.message, needsConfirm: true, word: RECONCILE_CONFIRM, plan: err.plan });
+        }
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/skills/install') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await installSkill({
+          name: String(body.name || ''),
+          scope: body.scope === 'project' ? 'project' : 'global',
+          harness: String(body.harness || ''),
+          projectDir: body.projectDir ? String(body.projectDir) : undefined,
+          force: body.force === true,
+        });
+        return json(res, 200, out);
+      } catch (err) {
+        if (err.code === 'NEEDS_FORCE') return json(res, 409, { error: err.message, needsForce: true });
+        return json(res, 400, { error: err.message });
+      }
+    }
+
     // ---- jobs de manutenção ----
+    if (route === 'GET /api/maintenance') {
+      // catálogo completo + de onde vêm o binário, o data-dir e a store
+      return json(res, 200, {
+        ...commandCatalog(),
+        runtime: { bin: config.bin, dataDir: config.dataDir, serverUrl: config.serverUrl, cwd: process.cwd() },
+      });
+    }
+    if (route === 'GET /api/maintenance/scope') {
+      // escopo que a CLI resolveria para o cwd do painel — é o alvo dos
+      // comandos por projeto quando o seletor fica em "automático"
+      try {
+        return json(res, 200, await resolveCwdScope());
+      } catch (err) {
+        return json(res, 200, { workspace: null, project: null, source: 'fallback', error: stderrMessage({ stderr: err.stderr, timedOut: err.timedOut, code: err.code }) || err.message });
+      }
+    }
     if (route === 'GET /api/jobs') {
       return json(res, 200, { jobs: listJobs(), commands: Object.keys(SPEC) });
     }
     if (route === 'POST /api/jobs') {
       const body = await readJsonBody(req);
       const command = String(body.command || '');
+      const scope = normalizeScope(body.scope);
+      const options = body.options ?? {};
       let built;
       try {
-        built = buildMaintenanceArgs(command, body.options ?? {}, { home });
-        checkConfirmation(command, body.confirm);
+        // preview: mesma validação, sem executar — alimenta o modal de ajuda
+        // (com fill: true, que tolera campos ainda vazios) e o de confirmação
+        if (body.preview === true) {
+          const args = previewArgs(command, options, { home, scope, fill: body.fill === true });
+          const confirm = confirmationFor(command, options);
+          return json(res, 200, { preview: true, command, args, scope: scope || null, confirmWord: confirm?.word || null, confirmHint: confirm?.hint || null });
+        }
+        built = buildMaintenanceArgs(command, options, { home, scope });
+        checkConfirmation(command, body.confirm, options);
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
       const job = createJob(command, built.args, { timeoutMs: built.timeoutMs, group: built.group });
-      return json(res, 201, { id: job.id, command, args: job.displayArgs, group: job.group });
+      return json(res, 201, { id: job.id, command, args: job.displayArgs, group: job.group, scope: scope || null });
     }
     {
       const m = pathname.match(/^\/api\/jobs\/([\w-]+)(\/stream)?$/);
