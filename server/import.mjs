@@ -8,17 +8,20 @@ import { scanKiro } from './import-kiro.mjs';
 import { sqliteAvailable, sqliteJsonQuery } from './import-sqlite.mjs';
 import { fingerprint, matchSlugToLinks, resolveTargetByPath } from './import-util.mjs';
 import { loadImportState, markImported, recordImportRun, importStateSummary } from './import-store.mjs';
+import { getBundleCandidate, listBundles, resolveBundlePath, scanBundleCandidates } from './bundle.mjs';
 import { tryTool } from './mcp.mjs';
 import { runCli, stderrMessage } from './cli.mjs';
 
-// Orquestração do importador: varre as memórias do Grok/Kiro, resolve o destino
-// (projeto vinculado ou _global), compara com o que já foi importado e grava
-// página a página via MCP (com fallback para `write-page` da CLI).
+// Orquestração do importador: varre as memórias do Grok/Kiro (e bundles do
+// próprio ai-memory), resolve o destino (projeto vinculado, escopo do bundle ou
+// _global), compara com o que já foi importado e grava página a página via MCP
+// (com fallback para `write-page` da CLI).
 
 export const IMPORT_SOURCES = [
   { id: 'grok-v1', label: 'Grok · memória v1', hint: 'MEMORY.md global + por projeto (+ sessões)', root: () => path.join(config.grokDir, 'memory') },
   { id: 'grok-v2', label: 'Grok · memória v2', hint: 'topics do global e dos workspaces (+ observações)', root: () => path.join(config.grokDir, 'memory-v2') },
   { id: 'kiro', label: 'Kiro · crew + steering', hint: 'semantic/episodic do crew, steering e diários', root: () => config.kiroDir },
+  { id: 'bundle', label: 'Bundle do ai-memory', hint: 'bundle .tar.gz de outro painel/servidor (ou de `ai-memory export-okf`)', root: () => config.exportsDir, needsFile: true },
 ];
 
 /** Links path→projeto vêm do client-projects.json (mesmo mapa da tela de Memórias). */
@@ -47,18 +50,31 @@ async function exists(p) {
   }
 }
 
-async function collectCandidates(id, { includeRaw = true, links, sqliteQuery } = {}) {
+async function collectCandidates(id, { includeRaw = true, links, sqliteQuery, bundleFile } = {}) {
   const resolvedLinks = links || getLinks();
   if (id === 'grok-v1') return scanGrokV1({ grokDir: config.grokDir }, { includeRaw });
   if (id === 'grok-v2') return scanGrokV2({ grokDir: config.grokDir }, { links: resolvedLinks, includeRaw, sqliteQuery });
   if (id === 'kiro') return scanKiro({ kiroDir: config.kiroDir, links: resolvedLinks, includeRaw, sqliteQuery });
+  if (id === 'bundle') {
+    if (!bundleFile) throw new Error('escolha o arquivo do bundle');
+    const file = await resolveBundlePath(bundleFile);
+    return scanBundleCandidates(file, { includeRaw });
+  }
   throw new Error(`fonte desconhecida: ${id}`);
+}
+
+/** Escopo do bundle → destino: a página volta para o mesmo escopo de origem. */
+function bundleTargetReason(scopeKey, links) {
+  const linked = (links || []).find((l) => `${l.workspace}/${l.project}` === scopeKey);
+  if (linked?.path) return `escopo do bundle (${scopeKey}) · vinculado aqui a ${linked.path}`;
+  return `escopo do bundle (${scopeKey}) — o destino cria o projeto se ele não existir`;
 }
 
 /** targetHint (parser) → { workspace, project } | { global: true } | null. */
 function resolveTarget(hint, links) {
   if (!hint) return { target: null, reason: 'origem sem destino identificado' };
   if (hint.kind === 'global') return { target: { global: true }, reason: 'escopo global (_global)' };
+  if (hint.kind === 'bundle') return { target: { workspace: hint.target.workspace, project: hint.target.project }, reason: bundleTargetReason(`${hint.target.workspace}/${hint.target.project}`, links) };
   if (hint.kind === 'resolved') return { target: { workspace: hint.target.workspace, project: hint.target.project }, reason: hint.target.reason || 'projeto vinculado' };
   if (hint.kind === 'path') {
     const found = resolveTargetByPath(hint.path, links);
@@ -98,9 +114,12 @@ function lightweight(item) {
 }
 
 /** Varre uma fonte e devolve os candidatos com destino, classificação e status. */
-export async function scanImportSource(id, { includeRaw = true, links, sqliteQuery } = {}) {
+export async function scanImportSource(id, { includeRaw = true, links, sqliteQuery, bundleFile } = {}) {
   const source = IMPORT_SOURCES.find((s) => s.id === id);
   if (!source) throw new Error(`fonte desconhecida: ${id}`);
+  if (source.needsFile) {
+    return scanImportFile(id, { includeRaw, links, bundleFile });
+  }
   const root = source.root();
   if (!(await exists(root))) {
     return { source: id, root, available: false, items: [], warnings: [`${root} não existe`], summary: emptySummary() };
@@ -131,6 +150,36 @@ export async function scanImportSource(id, { includeRaw = true, links, sqliteQue
   return { source: id, root, available: true, items, warnings, summary: summarize(items) };
 }
 
+/** Fontes que são um arquivo escolhido na tela (bundle), não um diretório. */
+async function scanImportFile(id, { includeRaw, links, bundleFile } = {}) {
+  let file = null;
+  try {
+    file = await resolveBundlePath(bundleFile);
+  } catch (err) {
+    return { source: id, root: config.exportsDir, available: false, file: null, items: [], warnings: [err.message], summary: emptySummary() };
+  }
+  const { items: rawItems, warnings, manifest, scopes } = await collectCandidates(id, { includeRaw, links, bundleFile: file });
+  const state = importStateSummary();
+  const resolvedLinks = links || getLinks();
+  const items = rawItems.map((raw) => lightweight(decorateItem(raw, resolvedLinks, state)));
+  return {
+    source: id,
+    root: file,
+    file,
+    available: true,
+    items,
+    warnings: warnings || [],
+    bundle: {
+      exportedAt: manifest?.exportedAt || null,
+      origin: manifest?.origin?.storeDir || null,
+      format: manifest?.format || null,
+      scopes: scopes || [],
+      totals: manifest?.totals || null,
+    },
+    summary: summarize(items),
+  };
+}
+
 function emptySummary() {
   return { total: 0, new: 0, changed: 0, same: 0, duplicate: 0, collision: 0, raw: 0, noTarget: 0 };
 }
@@ -148,6 +197,10 @@ function summarize(items) {
 
 /** Um item com o corpo completo (para o viewer da tela). */
 export async function getImportItem(id, key, opts = {}) {
+  if (id === 'bundle') {
+    const file = await resolveBundlePath(opts.bundleFile);
+    return getBundleCandidate(file, key, { includeRaw: opts.includeRaw !== false });
+  }
   const { items: rawItems } = await collectCandidates(id, opts);
   const found = rawItems.find((i) => i.key === key);
   if (!found) throw new Error('item não encontrado (a origem pode ter mudado)');
@@ -194,11 +247,30 @@ function cliArgsFor({ pagePath, title, kind, tier, tags, pinned, target }) {
 }
 
 /**
+ * Servidor de destino de uma importação: `null` = o do painel. Com `url`, a
+ * gravação vai para outro ai-memory — e o token local fica de fora do envio.
+ */
+export function normalizeServer(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const url = String(raw.url ?? '').trim().replace(/\/+$/, '');
+  if (!url) return null;
+  if (!/^https?:\/\/[^\s]+$/i.test(url)) throw new Error(`url de servidor inválida: ${url.slice(0, 80)}`);
+  const token = String(raw.token ?? '').trim().slice(0, 500);
+  return { url, token: token || null };
+}
+
+function serverEnv(server) {
+  if (!server) return undefined;
+  // '' (e não o token local) quando o destino remoto não tem token
+  return { AI_MEMORY_SERVER_URL: server.url, AI_MEMORY_AUTH_TOKEN: server.token || '' };
+}
+
+/**
  * Grava uma página: MCP `memory_write_page` primeiro (aceita scope global e
  * devolve erro estruturado) e `write-page` da CLI como fallback. O motivo da
  * queda vai no resultado para o log do job explicar o caminho usado.
  */
-export async function writePage({ pagePath, body, title, kind, tier, tags, pinned, target }) {
+export async function writePage({ pagePath, body, title, kind, tier, tags, pinned, target, server = null }) {
   const payload = {
     path: pagePath,
     body,
@@ -209,36 +281,32 @@ export async function writePage({ pagePath, body, title, kind, tier, tags, pinne
   if (title) payload.title = title;
   if (kind) payload.kind = kind;
   const mcpArgs = target.global ? { ...payload, scope: 'global' } : { ...payload, workspace: target.workspace, project: target.project };
+  const where = server ? ' (remoto)' : '';
 
-  const res = await tryTool('memory_write_page', mcpArgs, { timeoutMs: 60_000 });
-  if (res.ok) return { via: 'mcp', note: null };
+  const res = await tryTool('memory_write_page', mcpArgs, { timeoutMs: 60_000, target: server });
+  if (res.ok) return { via: `mcp${where}`, note: null, remote: Boolean(server) };
 
   const mcpNote = String(res.error || 'erro desconhecido').split('\n')[0].slice(0, 200);
   try {
     const r = await runCli(cliArgsFor({ pagePath, title, kind, tier, tags, pinned, target }), {
       stdinText: body,
       timeoutMs: 120_000,
+      env: serverEnv(server),
     });
     if (r.code !== 0) throw new Error(stderrMessage(r));
-    return { via: 'cli', note: mcpNote };
+    return { via: `cli${where}`, note: mcpNote, remote: Boolean(server) };
   } catch (err) {
     throw new Error(`MCP: ${res.error} · CLI: ${err.message}`);
   }
 }
 
 /**
- * Importa os itens escolhidos. Re-escaneia no servidor (o cliente manda só as
- * chaves), grava sequencialmente e registra fingerprint/destino no estado.
+ * Grava os itens escolhidos (já decorados por `decorateItem`), sequencialmente,
+ * e registra fingerprint/destino no estado. Vale para qualquer fonte: Grok,
+ * Kiro e bundle usam o mesmo caminho de escrita.
  */
-export async function applyImport({ source, keys, overrides = {}, includeRaw = true, dryRun = false, jobId = null, log = () => {}, links, sqliteQuery }) {
-  const resolvedLinks = links || getLinks();
-  // o apply precisa dos corpos (o scan que a tela viu é leve) — re-lê a origem
-  const { items: rawItems } = await collectCandidates(source, { includeRaw, links: resolvedLinks, sqliteQuery });
-  const state = importStateSummary();
-  const byKey = new Map(rawItems.map((raw) => {
-    const item = decorateItem(raw, resolvedLinks, state);
-    return [item.key, item];
-  }));
+export async function applyItems({ items, keys, overrides = {}, source, label = null, dryRun = false, jobId = null, log = () => {}, server = null }) {
+  const byKey = new Map(items.map((item) => [item.key, item]));
   const runId = randomUUID();
   const startedAt = Date.now();
 
@@ -262,7 +330,8 @@ export async function applyImport({ source, keys, overrides = {}, includeRaw = t
     chosen.push(prepared);
   }
 
-  log('sys', `import ${source}: ${chosen.length} selecionado(s), ${skipped.length} ignorado(s)${dryRun ? ' (dry-run: nada será gravado)' : ''}\n`);
+  log('sys', `import ${label || source}: ${chosen.length} selecionado(s), ${skipped.length} ignorado(s)${dryRun ? ' (dry-run: nada será gravado)' : ''}\n`);
+  if (server) log('sys', `destino: ${server.url} (remoto${server.token ? ', com token' : ', sem token'})\n`);
   const imported = [];
   const failed = [];
   const entries = [];
@@ -270,19 +339,19 @@ export async function applyImport({ source, keys, overrides = {}, includeRaw = t
   for (const item of chosen) {
     i += 1;
     const place = item.target.global ? '_global' : `${item.target.workspace}/${item.target.project}`;
-    const label = `[${i}/${chosen.length}] ${place} · ${item.suggested.path}`;
+    const line = `[${i}/${chosen.length}] ${place} · ${item.suggested.path}`;
     if (dryRun) {
-      log('out', `${label} (dry-run)\n`);
+      log('out', `${line} (dry-run)\n`);
       continue;
     }
     try {
-      const out = await writePage({ pagePath: item.suggested.path, body: item.body, title: item.title, kind: item.suggested.kind, tier: item.suggested.tier, tags: item.suggested.tags, pinned: item.suggested.pinned, target: item.target });
+      const out = await writePage({ pagePath: item.suggested.path, body: item.body, title: item.title, kind: item.suggested.kind, tier: item.suggested.tier, tags: item.suggested.tags, pinned: item.suggested.pinned, target: item.target, server });
       imported.push({ key: item.key, path: item.suggested.path, target: place, via: out.via });
       entries.push({ key: item.key, fp: item.fingerprint, destPath: item.suggested.path, destTarget: place, importedAt: new Date().toISOString() });
-      log('out', `${label} ✓ (${out.via}${out.note ? `; MCP falhou: ${out.note}` : ''})\n`);
+      log('out', `${line} ✓ (${out.via}${out.note ? `; MCP falhou: ${out.note}` : ''})\n`);
     } catch (err) {
       failed.push({ key: item.key, path: item.suggested.path, error: err.message });
-      log('err', `${label} ✗ ${err.message}\n`);
+      log('err', `${line} ✗ ${err.message}\n`);
     }
   }
 
@@ -300,10 +369,42 @@ export async function applyImport({ source, keys, overrides = {}, includeRaw = t
     skipped: skipped.length,
     items: imported.map((x) => ({ key: x.key, path: x.path, target: x.target })),
     errors: failed.map((x) => ({ key: x.key, path: x.path, error: x.error })),
+    ...(server ? { server: server.url } : {}),
   };
   recordImportRun(run);
   log('sys', `resumo: ${imported.length} importada(s), ${failed.length} falha(s), ${skipped.length} ignorada(s)${dryRun ? ' — dry-run' : ''}\n`);
   return { runId, imported, failed, skipped };
+}
+
+/**
+ * Importa os itens escolhidos de uma fonte lida do disco (Grok/Kiro). Re-escaneia
+ * no servidor (o cliente manda só as chaves), decora e delega para `applyItems`.
+ */
+export async function applyImport({ source, keys, overrides = {}, includeRaw = true, dryRun = false, jobId = null, log = () => {}, links, sqliteQuery }) {
+  const resolvedLinks = links || getLinks();
+  // o apply precisa dos corpos (o scan que a tela viu é leve) — re-lê a origem
+  const { items: rawItems } = await collectCandidates(source, { includeRaw, links: resolvedLinks, sqliteQuery });
+  const state = importStateSummary();
+  const items = rawItems.map((raw) => decorateItem(raw, resolvedLinks, state));
+  return applyItems({ items, keys, overrides, source, dryRun, jobId, log });
+}
+
+/**
+ * Importa páginas de um bundle .tar.gz — o caminho para levar memórias a outro
+ * servidor (o bundle pode ter vindo de outra máquina e o destino pode ser
+ * remoto, via URL + token).
+ */
+export async function applyBundleImport({ keys, overrides = {}, includeRaw = true, bundleFile, dryRun = false, jobId = null, log = () => {}, links, server = null }) {
+  if (!bundleFile) throw new Error('escolha o arquivo do bundle');
+  const file = await resolveBundlePath(bundleFile);
+  const resolvedLinks = links || getLinks();
+  const target = normalizeServer(server);
+  const { items: rawItems, warnings } = await collectCandidates('bundle', { includeRaw, links: resolvedLinks, bundleFile: file });
+  for (const w of (warnings || []).slice(0, 10)) log('sys', `aviso: ${w}\n`);
+  const state = importStateSummary();
+  const items = rawItems.map((raw) => decorateItem(raw, resolvedLinks, state));
+  log('sys', `bundle: ${path.basename(file)}\n`);
+  return applyItems({ items, keys, overrides, source: 'bundle', label: `bundle ${path.basename(file)}`, dryRun, jobId, log, server: target });
 }
 
 /** Fontes detectadas + contagens leves + últimos imports. */
@@ -312,13 +413,32 @@ export async function listImportSources() {
   const sqlite = await sqliteAvailable();
   const state = loadImportState();
   const sources = [];
+  const bundles = await listBundles();
 
   for (const src of IMPORT_SOURCES) {
+    const lastRun = state.runs.find((r) => r.source === src.id) || null;
+    if (src.needsFile) {
+      // bundle: a "fonte" é a pasta de exports + os arquivos que estão nela
+      const pages = bundles.bundles.reduce((n, b) => n + (Number(b.pages) || 0), 0);
+      sources.push({
+        id: src.id,
+        label: src.label,
+        hint: src.hint,
+        root: bundles.dir,
+        available: true,
+        needsFile: true,
+        counts: { curated: pages, raw: 0, bundles: bundles.bundles.length },
+        bundles: bundles.bundles.map((b) => ({ file: b.file, bytes: b.bytes, mtime: b.mtime, pages: b.pages, scopes: b.scopes, exportedAt: b.exportedAt, origin: b.origin, error: b.error })),
+        warnings: [],
+        lastRun: lastRun ? { id: lastRun.id, endedAt: lastRun.endedAt, imported: lastRun.imported, planned: lastRun.planned ?? 0, dryRun: Boolean(lastRun.dryRun), failed: lastRun.failed } : null,
+      });
+      continue;
+    }
+
     const root = src.root();
     const available = await exists(root);
     const counts = { curated: 0, raw: 0 };
     const warnings = [];
-    let lastRun = state.runs.find((r) => r.source === src.id) || null;
 
     if (available && src.id === 'grok-v1') {
       const dirs = (await listDirEntries(root)).filter((e) => e.isDirectory());

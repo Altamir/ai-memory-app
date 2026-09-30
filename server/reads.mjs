@@ -73,7 +73,7 @@ async function cliRecent(max, scope, errorNote) {
   try {
     const { readdir } = await import('node:fs/promises');
     const path = await import('node:path');
-    const wikiDir = `${home}/.ai-memory-data/ai-memory/wiki`;
+    const wikiDir = path.join(config.storeDir, 'wiki');
     const walk = async (dir, base = '') => {
       let entries;
       try {

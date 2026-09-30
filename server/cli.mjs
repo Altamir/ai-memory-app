@@ -20,14 +20,15 @@ export function cliEnv() {
  * Executa o binário ai-memory e resolve com { code, stdout, stderr, timedOut }.
  * stderr carrega os logs INFO da CLI; stdout é a saída do comando.
  * `stdinText` (string) alimenta o stdin do processo (ex.: write-page --body -).
+ * `env` sobrepõe variáveis (ex.: apontar a CLI para outro servidor).
  */
-export function runCli(args, { timeoutMs = 120_000, cwd, stdinText } = {}) {
+export function runCli(args, { timeoutMs = 120_000, cwd, stdinText, env: extraEnv } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
       child = spawn(config.bin, ['--data-dir', config.dataDir, ...args], {
         cwd,
-        env: cliEnv(),
+        env: extraEnv ? { ...cliEnv(), ...extraEnv } : cliEnv(),
         stdio: [stdinText === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       });
     } catch (err) {

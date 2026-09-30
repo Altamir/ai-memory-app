@@ -13,6 +13,10 @@ export const config = {
   bin: process.env.AI_MEMORY_BIN || path.join(home, '.local', 'bin', 'ai-memory'),
   dataDir: process.env.AI_MEMORY_DATA_DIR || path.join(home, 'Library', 'Application Support', 'ai-memory'),
   serverUrl: (process.env.AI_MEMORY_SERVER_URL || 'http://127.0.0.1:49374').replace(/\/+$/, ''),
+  // volume do servidor ai-memory (wiki + db). O painel lê daqui para exportar;
+  // no Docker é o bind de `AI_MEMORY_DATA_DIR` do compose.
+  storeDir: process.env.AIM_STORE_DIR || path.join(home, '.ai-memory-data', 'ai-memory'),
+  exportsDir: process.env.AIM_APP_EXPORT_DIR || path.join(root, 'exports'),
   grokDir: process.env.AIM_IMPORT_GROK_DIR || path.join(home, '.grok'),
   kiroDir: process.env.AIM_IMPORT_KIRO_DIR || path.join(home, '.kiro'),
   jobHistoryLimit: 30,

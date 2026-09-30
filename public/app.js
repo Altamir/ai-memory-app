@@ -163,6 +163,7 @@ const TITLES = {
   sessions: 'Sessões run',
   memories: 'Memórias',
   import: 'Importar memórias',
+  export: 'Exportar bundle',
   skills: 'Skills dos harnesses',
 };
 
@@ -1837,7 +1838,7 @@ VIEWS.memories = async (main) => {
   await runSearch();
 };
 
-// ---------- view: importar memórias (Grok / Kiro) ----------
+// ---------- view: importar memórias (Grok / Kiro / bundle do ai-memory) ----------
 
 const IMPORT_STATUS = {
   new: { cls: 'chip-info', label: 'novo' },
@@ -1847,6 +1848,9 @@ const IMPORT_STATUS = {
   collision: { cls: 'chip-err', label: 'mesma página' },
 };
 const NO_TARGET = '∅';
+
+// bundle escolhido na aba Exportar e levado para o importador (só em memória)
+let PENDING_BUNDLE = null;
 
 VIEWS.import = async (main) => {
   const state = {
@@ -1861,6 +1865,8 @@ VIEWS.import = async (main) => {
     selected: new Set(),
     overrides: {},
     busy: false,
+    bundleFile: null,
+    remote: { enabled: false, url: '', token: '' },
   };
 
   const runtimeChips = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' });
@@ -1886,7 +1892,7 @@ VIEWS.import = async (main) => {
         el('button', { class: 'btn btn-secondary btn-sm', text: '? como funciona', onclick: importHelpModal }),
       ),
     ),
-    el('div', { class: 'small muted', text: 'O painel lê as memórias curadas do Grok e do Kiro no seu home, resolve o projeto de cada uma pelos vínculos do client-projects.json e grava páginas no ai-memory (via MCP, com a CLI como reserva). Nada é gravado antes de você revisar a lista: o scan é somente leitura e cada item pode ser aberto, redirecionado ou descartado.' }),
+    el('div', { class: 'small muted', text: 'O painel lê as memórias curadas do Grok e do Kiro no seu home, os bundles exportados pelo próprio ai-memory, resolve o projeto de cada uma pelos vínculos do client-projects.json e grava páginas no ai-memory (via MCP, com a CLI como reserva). Nada é gravado antes de você revisar a lista: o scan é somente leitura e cada item pode ser aberto, redirecionado ou descartado.' }),
     runtimeChips,
   );
 
@@ -1913,6 +1919,13 @@ VIEWS.import = async (main) => {
     renderRuntime();
     renderSources();
     await renderHistory();
+    // veio da aba Exportar com "usar no importador": já escaneia o bundle
+    if (PENDING_BUNDLE) {
+      const file = PENDING_BUNDLE;
+      PENDING_BUNDLE = null;
+      state.bundleFile = file;
+      doScan('bundle');
+    }
   }
 
   function renderRuntime() {
@@ -1933,6 +1946,7 @@ VIEWS.import = async (main) => {
   }
 
   function sourceCard(src) {
+    if (src.needsFile) return bundleSourceCard(src);
     const last = src.lastRun;
     return el('div', { class: 'card stack' },
       el('div', { class: 'row-between' },
@@ -1958,6 +1972,60 @@ VIEWS.import = async (main) => {
     );
   }
 
+  /**
+   * Bundle: a fonte é um arquivo .tar.gz (da pasta de exports ou um caminho
+   * digitado — o bundle pode ter vindo de outra máquina).
+   */
+  function bundleSourceCard(src) {
+    const bundles = src.bundles || [];
+    const last = src.lastRun;
+    const known = bundles.some((b) => b.file === state.bundleFile);
+    const sel = el('select', { class: 'field' },
+      el('option', { value: '', text: bundles.length ? 'escolher bundle…' : 'nenhum bundle na pasta ainda' }),
+      ...bundles.map((b) => el('option', {
+        value: b.file,
+        text: `${b.file} — ${b.pages ?? '?'} página(s)${b.scopes?.length ? ` · ${b.scopes.length} escopo(s)` : ''}${b.error ? ' · ilegível' : ''}`,
+      })),
+    );
+    if (known) sel.value = state.bundleFile;
+    const pathInput = el('input', {
+      class: 'field mono',
+      placeholder: 'ou o caminho do arquivo: ~/Downloads/bundle.tar.gz',
+      autocomplete: 'off',
+      value: state.bundleFile && !known ? state.bundleFile : '',
+    });
+    const chosen = () => pathInput.value.trim() || sel.value;
+    const scanBtn = el('button', {
+      class: 'btn btn-primary btn-sm',
+      text: 'Escanear',
+      onclick: () => { state.bundleFile = chosen(); if (!state.bundleFile) { toast('escolha o arquivo do bundle', 'err'); return; } doScan('bundle'); },
+    });
+    const selected = bundles.find((b) => b.file === state.bundleFile);
+    return el('div', { class: 'card stack' },
+      el('div', { class: 'row-between' },
+        el('strong', { text: src.label }),
+        el('span', { class: `chip ${bundles.length ? 'chip-ok' : 'chip-warn'}`, text: `${bundles.length} arquivo(s)` }),
+      ),
+      el('div', { class: 'mono small muted', text: src.root }),
+      el('div', { class: 'small muted', text: src.hint }),
+      el('div', { class: 'small muted', text: 'O destino de cada página é o mesmo escopo de origem do bundle (o projeto é criado no servidor de destino se ainda não existir) — e dá para apontar para outro ai-memory no campo "servidor de destino", depois do scan.' }),
+      sel,
+      pathInput,
+      selected
+        ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' },
+            el('span', { class: 'chip', text: `${selected.pages ?? '?'} página(s)` }),
+            selected.exportedAt ? el('span', { class: 'chip', text: `exportado ${timeAgo(selected.exportedAt) || selected.exportedAt}` }) : null,
+            selected.origin ? el('span', { class: 'chip mono', text: `de ${selected.origin}` }) : null,
+            selected.error ? el('span', { class: 'chip chip-err', text: selected.error }) : null,
+          )
+        : null,
+      last
+        ? el('div', { class: 'small muted', text: `último import desta fonte: ${timeAgo(last.endedAt) || 'agora'} · ${last.imported} importada(s)${last.failed ? ` · ${last.failed} falha(s)` : ''}` })
+        : null,
+      el('div', { class: 'row' }, scanBtn, el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => loadSources() })),
+    );
+  }
+
   // ---- scan ----
 
   async function doScan(id) {
@@ -1969,7 +2037,7 @@ VIEWS.import = async (main) => {
     scanHost.replaceChildren(el('div', { class: 'empty', text: `escaneando ${id}…` }));
     let scan;
     try {
-      scan = await api('/api/import/scan', { method: 'POST', body: { source: id } });
+      scan = await api('/api/import/scan', { method: 'POST', body: { source: id, bundleFile: id === 'bundle' ? state.bundleFile : undefined } });
     } catch (err) {
       scanHost.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro no scan: ${err.message}` })));
       state.busy = false;
@@ -2060,6 +2128,9 @@ VIEWS.import = async (main) => {
       ),
     );
 
+    // bundle: o destino pode ser OUTRO servidor do ai-memory (URL + token)
+    const serverPanel = state.source === 'bundle' ? destinationServerPanel() : null;
+
     const groupNodes = order.map((g) => {
       const list = groups.get(g);
       const header = el('div', { class: 'imp-group' },
@@ -2074,12 +2145,15 @@ VIEWS.import = async (main) => {
       return el('div', { class: 'stack', style: 'gap:6px' }, header, ...list.map(itemRow));
     });
 
-    scanHost.replaceChildren(
+    scanHost.replaceChildren(...[
       el('div', { class: 'card stack' },
         el('div', { class: 'row-between', style: 'flex-wrap:wrap' },
           el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
             el('strong', { text: `Scan: ${state.scan.source}` }),
             el('span', { class: 'chip', text: `${s.total} item(ns)` }),
+            state.scan.file ? el('span', { class: 'chip mono', text: String(state.scan.file).split('/').pop() }) : null,
+            state.scan.bundle?.origin ? el('span', { class: 'chip mono', text: `de ${state.scan.bundle.origin}` }) : null,
+            state.scan.bundle?.exportedAt ? el('span', { class: 'chip', text: `exportado ${timeAgo(state.scan.bundle.exportedAt) || state.scan.bundle.exportedAt}` }) : null,
             chipFilter('todos', 'all', s.total),
             chipFilter('novos', 'new', s.new || 0),
             chipFilter('alterados', 'changed', s.changed || 0),
@@ -2101,9 +2175,41 @@ VIEWS.import = async (main) => {
         el('div', { class: 'small muted', text: 'itens crus (sessões, observações, diários, episódicos) entram desmarcados por padrão. "duplicado" = o mesmo conteúdo já foi importado por outra fonte; "mesma página" = outro item deste scan quer o mesmo path (importe um por vez).' }),
       ),
       groupNodes.length ? el('div', { class: 'stack' }, ...groupNodes) : el('div', { class: 'empty', text: 'nenhum item com os filtros atuais' }),
+      serverPanel,
       actionBar,
-    );
+    ].filter(Boolean));
     main.scrollTop = scroll;
+  }
+
+  /**
+   * Para onde o lote vai: o servidor do painel (padrão) ou outro ai-memory.
+   * O token fica só na memória da página — não é salvo em lugar nenhum.
+   */
+  function destinationServerPanel() {
+    const urlInput = el('input', { class: 'field mono', placeholder: 'http://outro-host:49374', autocomplete: 'off', value: state.remote.url });
+    const tokenInput = el('input', { class: 'field', type: 'password', placeholder: 'token do outro servidor (Bearer)', autocomplete: 'off', value: state.remote.token });
+    urlInput.addEventListener('input', () => { state.remote.url = urlInput.value.trim(); });
+    tokenInput.addEventListener('input', () => { state.remote.token = tokenInput.value.trim(); });
+    const radio = (value, label) => {
+      const input = el('input', { type: 'radio', name: 'imp-server', value });
+      input.checked = (value === 'remote') === Boolean(state.remote.enabled);
+      input.addEventListener('change', () => { if (input.checked) { state.remote.enabled = value === 'remote'; renderScan(); } });
+      return el('label', { class: 'check' }, input, label);
+    };
+    const rt = state.runtime || {};
+    return el('div', { class: 'card stack', style: 'gap:6px' },
+      el('strong', { text: 'Servidor de destino' }),
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px' },
+        radio('local', `este painel (${rt.serverUrl || '?'})`),
+        radio('remote', 'outro servidor do ai-memory'),
+      ),
+      state.remote.enabled
+        ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, urlInput, tokenInput)
+        : null,
+      el('div', { class: 'small muted', text: state.remote.enabled
+        ? 'Sem token local nenhum: o painel envia só o token digitado (e nada é salvo no disco). O destino cria o projeto se ele não existir.'
+        : 'A gravação vai para o servidor configurado no painel — troque para "outro servidor" ao levar o bundle para outra máquina.' }),
+    );
   }
 
   function targetPicker(list) {
@@ -2171,7 +2277,7 @@ VIEWS.import = async (main) => {
     modal({ title: it.title, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
     let full;
     try {
-      full = await api('/api/import/item', { method: 'POST', body: { source: state.source, key: it.key } });
+      full = await api('/api/import/item', { method: 'POST', body: { source: state.source, key: it.key, bundleFile: state.source === 'bundle' ? state.bundleFile : undefined } });
     } catch (err) {
       box.replaceChildren(el('div', { class: 'small', text: `Erro: ${err.message}` }));
       return;
@@ -2334,6 +2440,11 @@ VIEWS.import = async (main) => {
           noTarget ? el('span', { class: 'chip chip-err', text: `${noTarget} sem destino — pulado(s)` }) : null,
         ),
         el('div', { class: 'small muted', text: dryRun ? 'O dry-run não grava nada: só lista o que cada item faria, no log.' : 'A gravação é página a página: itens com o mesmo path viram NOVAS versões da página existente (o ai-memory versiona, não duplica o arquivo). Falhas ficam isoladas por item no log.' }),
+        state.source === 'bundle'
+          ? el('div', { class: `small ${state.remote.enabled ? '' : 'muted'}`, text: state.remote.enabled
+              ? `Destino: ${state.remote.url} — outro servidor do ai-memory${state.remote.token ? ' (com token digitado)' : ' (sem token)'}.`
+              : `Destino: o servidor deste painel (${state.runtime?.serverUrl || '?'}).` })
+          : null,
         el('div', { class: 'small muted', text: `${chosen.slice(0, 8).map((i) => i.suggested.path).join(' · ')}${chosen.length > 8 ? ` … (+${chosen.length - 8})` : ''}` }),
       ),
       actions: [
@@ -2351,9 +2462,23 @@ VIEWS.import = async (main) => {
     state.busy = true;
     const keys = [...state.selected];
     const overrides = { ...state.overrides };
+    const isBundle = state.source === 'bundle';
+    if (isBundle && state.remote.enabled && (!state.remote.url || !/^https?:\/\/\S+$/i.test(state.remote.url))) {
+      state.busy = false;
+      toast('informe a URL do outro servidor (http://host:porta)', 'err');
+      return;
+    }
+    const payload = {
+      source: state.source,
+      keys,
+      overrides,
+      dryRun,
+      bundleFile: isBundle ? state.bundleFile : undefined,
+      server: isBundle && state.remote.enabled ? { url: state.remote.url, token: state.remote.token } : undefined,
+    };
     let started;
     try {
-      started = await api('/api/import/apply', { method: 'POST', body: { source: state.source, keys, overrides, dryRun } });
+      started = await api('/api/import/apply', { method: 'POST', body: payload });
     } catch (err) {
       state.busy = false;
       toast(err.message, 'err');
@@ -2362,7 +2487,8 @@ VIEWS.import = async (main) => {
     logCard.style.display = '';
     logCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     toast(`import iniciado: ${started.total} item(ns)`);
-    showJob(started.id, logCard, statusChip, { scopeNote: `${started.total} item(ns) · ${state.source}` });
+    const scopeNote = `${started.total} item(ns) · ${state.source}${isBundle && state.remote.enabled ? ` → ${state.remote.url}` : ''}`;
+    showJob(started.id, logCard, statusChip, { scopeNote });
     const watch = setInterval(async () => {
       let j;
       try {
@@ -2444,7 +2570,14 @@ function importHelpModal() {
         'Grok v1 (~/.grok/memory): MEMORY.md global e de cada projeto, divididos por seção (## ...). Sessões (sessions/*.md) entram como itens crus, desmarcados.',
         'Grok v2 (~/.grok/memory-v2): um item por tópico (topics/*.md) do global e de cada workspace; observações da _inbox entram como crus.',
         'Kiro (~/.kiro): steering (inclusion: always vira regra), memórias semantic do crew agrupadas por projeto, episodic agrupadas por dia e diários do crew.',
+        'Bundle do ai-memory: um .tar.gz exportado na aba Exportar (ou por `ai-memory export-okf`). O destino padrão de cada página é o mesmo escopo de origem do bundle.',
         'knowledge.db do Kiro e implement-memory do Grok ficam fora: são biblioteca de documentos, não memória curada.',
+      ])),
+      helpSection('Importar um bundle em outro servidor', bullets([
+        'Escolha o arquivo na fonte "Bundle do ai-memory" (pasta de exports do painel ou um caminho digitado) e clique em Escanear.',
+        'No campo "servidor de destino", troque para "outro servidor do ai-memory" e informe a URL e o token (Bearer) da outra máquina: a gravação vai por MCP para lá.',
+        'O token digitado não é salvo em disco, e o token local do painel nunca é enviado para o servidor remoto.',
+        'Se o MCP remoto cair, a CLI é usada como reserva já apontada para a URL informada (mesmo token).',
       ])),
       helpSection('Destino de cada página', bullets([
         'Tópicos globais do Grok (estilo, fluxo, VPS) e memórias sem projeto identificado vão para _global, o escopo reservado que aparece em todos os projetos.',
@@ -2462,6 +2595,305 @@ function importHelpModal() {
         'A gravação usa a tool MCP memory_write_page (com scope global) e cai para o binário da CLI (write-page --body -) se o MCP falhar; o log diz qual caminho foi usado por item.',
         'Reimportar atualiza a página (o ai-memory versiona por path) — não cria arquivos duplicados. Duplicados entre fontes já vêm marcados.',
         'Nada é importado sem destino: itens "sem destino" são pulados no lote.',
+      ])),
+    ),
+    actions: [{ label: 'Fechar' }],
+  });
+}
+
+// ---------- view: exportar bundle ----------
+
+VIEWS.export = async (main) => {
+  const state = {
+    store: null,
+    scopes: [],
+    totals: null,
+    bundles: [],
+    exportsDir: null,
+    runtime: null,
+    selected: new Set(),
+    includeRaw: false,
+    name: '',
+    busy: false,
+  };
+
+  const runtimeChips = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' });
+  const scopesCard = el('div', { class: 'card stack' });
+  const bundlesCard = el('div', { class: 'card stack' });
+  const statusChip = el('span', { class: 'chip', text: 'idle' });
+  const logCard = el(
+    'div',
+    { class: 'card stack', style: 'display:none' },
+    el('div', { class: 'row-between' },
+      el('div', { class: 'row' }, el('strong', { text: 'Log da exportação' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
+      el('div', { class: 'row' }, statusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); logCard.style.display = 'none'; } })),
+    ),
+    el('div', { class: 'log-panel' }),
+  );
+
+  const headerCard = el('div', { class: 'card stack' },
+    el('div', { class: 'row-between' },
+      el('strong', { text: 'Levar as memórias para outro servidor' }),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => load() }),
+        el('button', { class: 'btn btn-secondary btn-sm', text: '? como funciona', onclick: exportHelpModal }),
+      ),
+    ),
+    el('div', { class: 'small muted', text: 'O painel junta as páginas dos escopos escolhidos (o conteúdo vem do próprio wiki; a lista de páginas vem do SQLite do servidor) num .tar.gz com manifesto, e grava na pasta de exports. Esse arquivo é o que a aba Importar consome — aqui mesmo ou em outra máquina, apontando para o servidor de destino.' }),
+    runtimeChips,
+  );
+
+  main.append(el('div', { class: 'stack' }, headerCard, scopesCard, logCard, bundlesCard));
+
+  async function load() {
+    scopesCard.replaceChildren(el('div', { class: 'empty', text: 'lendo o store…' }));
+    let data;
+    try {
+      data = await api('/api/export/sources');
+    } catch (err) {
+      scopesCard.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro: ${err.message}` })));
+      return;
+    }
+    state.store = data.store;
+    state.scopes = data.scopes || [];
+    state.totals = data.totals || null;
+    state.bundles = data.bundles || [];
+    state.exportsDir = data.exportsDir;
+    state.runtime = data.runtime || null;
+    // primeira carga: tudo selecionado (menos _global, que é escolha explícita)
+    if (!state.selected.size) {
+      for (const s of state.scopes) state.selected.add(`${s.workspace}/${s.project}`);
+    }
+    renderRuntime();
+    renderScopes();
+    renderBundles();
+  }
+
+  function renderRuntime() {
+    const st = state.store;
+    if (!st) return;
+    runtimeChips.replaceChildren(...[
+      el('span', { class: `chip ${st.available ? 'chip-ok' : 'chip-err'}`, text: `store ${st.dir}` }),
+      el('span', { class: `chip ${st.sqlite ? 'chip-ok' : 'chip-warn'}`, text: st.sqlite ? 'sqlite3 ok' : 'sqlite3 ausente' }),
+      el('span', { class: 'chip mono', text: `exports ${state.exportsDir}` }),
+      state.runtime?.serverUrl ? el('span', { class: 'chip mono', text: `servidor ${state.runtime.serverUrl}` }) : null,
+      state.totals ? el('span', { class: 'chip', text: `${state.totals.pages} página(s) · ${state.totals.raw} crua(s) · ${state.totals.scopes} escopo(s)` }) : null,
+      ...(st.note || []).map((n) => el('span', { class: 'chip chip-err', text: n })),
+      st.error ? el('span', { class: 'chip chip-err', text: st.error }) : null,
+    ].filter(Boolean));
+  }
+
+  function chosen() {
+    return state.scopes.filter((s) => state.selected.has(`${s.workspace}/${s.project}`));
+  }
+
+  function renderScopes() {
+    if (!state.scopes.length) {
+      scopesCard.replaceChildren(el('div', { class: 'card stack' },
+        el('strong', { text: 'Nenhum escopo no store' }),
+        el('div', { class: 'small muted', text: state.store?.sqlite
+          ? `O store em ${state.store.dir} não devolveu nenhuma página latest.`
+          : 'Sem o sqlite3 no PATH o painel não lista as páginas do store — defina AIM_STORE_DIR se o volume estiver em outro lugar.' }),
+      ));
+      return;
+    }
+    const rows = state.scopes.map((s) => {
+      const key = `${s.workspace}/${s.project}`;
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = state.selected.has(key);
+      cb.addEventListener('change', () => {
+        if (cb.checked) state.selected.add(key);
+        else state.selected.delete(key);
+        renderScopes();
+      });
+      return el('div', { class: 'imp-item' },
+        el('label', { class: 'check', style: 'align-self:flex-start; margin-top:2px' }, cb),
+        el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('strong', { style: 'font-size:13px', text: key }),
+            s.global ? el('span', { class: 'chip chip-info', text: '_global' }) : null,
+            el('span', { class: 'chip', text: `${s.pages} página(s)` }),
+            s.raw ? el('span', { class: 'chip chip-warn', text: `${s.raw} crua(s)` }) : null,
+            s.pinned ? el('span', { class: 'chip', text: `${s.pinned} pinned` }) : null,
+            el('span', { class: 'chip', text: fmtBytes(s.bytes) || '0 B' }),
+          ),
+          s.repoPath ? el('div', { class: 'mono small muted', text: s.repoPath }) : null,
+        ),
+      );
+    });
+    const pick = (on) => {
+      state.selected = new Set(on ? state.scopes.map((s) => `${s.workspace}/${s.project}`) : []);
+      renderScopes();
+    };
+    const rawCb = el('input', { type: 'checkbox' });
+    rawCb.checked = state.includeRaw;
+    rawCb.addEventListener('change', () => { state.includeRaw = rawCb.checked; renderScopes(); });
+    const nameInput = el('input', { class: 'field mono', placeholder: 'nome do arquivo (opcional)', autocomplete: 'off', value: state.name, style: 'max-width:320px' });
+    nameInput.addEventListener('input', () => { state.name = nameInput.value.trim(); });
+
+    scopesCard.replaceChildren(
+      el('div', { class: 'row-between', style: 'flex-wrap:wrap' },
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('strong', { text: 'O que entra no bundle' }),
+          el('span', { class: 'chip', text: `${chosen().length} de ${state.scopes.length} escopo(s)` }),
+        ),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'todos', onclick: () => pick(true) }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'nenhum', onclick: () => pick(false) }),
+        ),
+      ),
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px' },
+        el('label', { class: 'check' }, rawCb, 'incluir páginas cruas (sessões, logs, episódicas)'),
+      ),
+      el('div', { class: 'small muted', text: 'Sem os crus, ficam de fora as páginas de sessão/histórico (tier episodic, sessions/, log-*.md). As páginas de _rules, gotchas, decisions e notes vão sempre com frontmatter, tier, tags e pinned preservados.' }),
+      el('div', { class: 'stack', style: 'gap:6px' }, ...rows),
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, nameInput,
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'simular (dry-run)', disabled: !chosen().length, onclick: planExport }),
+        el('button', { class: 'btn btn-primary btn-sm', text: 'Exportar bundle', disabled: !chosen().length || state.busy, onclick: startExport }),
+      ),
+    );
+  }
+
+  async function planExport() {
+    let plan;
+    try {
+      plan = await api('/api/export/plan', { method: 'POST', body: { scopes: chosen().map((s) => ({ workspace: s.workspace, project: s.project })), includeRaw: state.includeRaw, name: state.name } });
+    } catch (err) {
+      toast(err.message, 'err');
+      return;
+    }
+    modal({
+      title: 'Simular exportação (dry-run)',
+      wide: true,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('span', { class: 'chip chip-info', text: `${plan.pages} página(s)` }),
+          el('span', { class: 'chip', text: fmtBytes(plan.bytes) || '0 B' }),
+          el('span', { class: 'chip', text: `${plan.scopes.length} escopo(s)` }),
+          plan.rawSkipped ? el('span', { class: 'chip chip-warn', text: `${plan.rawSkipped} crua(s) fora` }) : null,
+        ),
+        el('div', { class: 'mono small muted', text: `${state.exportsDir}/${plan.file}` }),
+        el('div', { class: 'small muted', text: 'O dry-run não grava nada: só lista o que entraria, sem ler os arquivos do wiki.' }),
+        plan.warnings?.length ? el('div', { class: 'small', style: 'color:var(--attention)', text: `avisos: ${plan.warnings.slice(0, 4).join(' · ')}` }) : null,
+        el('div', { class: 'stack', style: 'gap:2px' },
+          ...plan.scopes.map((s) => el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('span', { class: 'chip mono', text: s.key }),
+            el('span', { class: 'chip', text: `${s.pages} página(s)` }),
+            el('span', { class: 'chip', text: fmtBytes(s.bytes) || '0 B' }),
+            s.rawSkipped ? el('span', { class: 'chip chip-warn', text: `${s.rawSkipped} crua(s) fora` }) : null,
+          )),
+        ),
+        el('div', { class: 'small muted', text: `primeiras páginas: ${plan.preview.slice(0, 12).map((p) => p.path).join(' · ')}${plan.preview.length > 12 ? ` … (+${plan.pages - 12})` : ''}` }),
+      ),
+      actions: [
+        { label: 'Fechar' },
+        { label: 'Exportar agora', kind: 'primary', onClick: (close) => { close(); startExport(); } },
+      ],
+    });
+  }
+
+  async function startExport() {
+    if (state.busy) return;
+    state.busy = true;
+    let started;
+    try {
+      started = await api('/api/export/run', { method: 'POST', body: { scopes: chosen().map((s) => ({ workspace: s.workspace, project: s.project })), includeRaw: state.includeRaw, name: state.name } });
+    } catch (err) {
+      state.busy = false;
+      toast(err.message, 'err');
+      return;
+    }
+    toast(`exportação iniciada: ${started.scopes.length} escopo(s)`);
+    logCard.style.display = '';
+    logCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    showJob(started.id, logCard, statusChip, { scopeNote: `${started.scopes.length} escopo(s)${state.includeRaw ? ' · com cruas' : ''}` });
+    const watch = setInterval(async () => {
+      let j;
+      try {
+        j = await api(`/api/jobs/${started.id}`);
+      } catch {
+        clearInterval(watch);
+        state.busy = false;
+        return;
+      }
+      if (j.status === 'running') return;
+      clearInterval(watch);
+      state.busy = false;
+      toast(j.status === 'ok' ? 'bundle pronto' : `exportação terminou com ${j.status}`, j.status === 'ok' ? 'ok' : 'err');
+      await load();
+    }, 1200);
+  }
+
+  function renderBundles() {
+    if (!state.bundles.length) {
+      bundlesCard.replaceChildren(el('div', { class: 'row-between' },
+        el('strong', { text: 'Bundles na pasta de exports' }),
+        el('span', { class: 'chip', text: 'nenhum ainda' }),
+      ), el('div', { class: 'small muted', text: `Os arquivos ficam em ${state.exportsDir} (mode 600: bundle tem memória privada).` }));
+      return;
+    }
+    const rows = state.bundles.map((b) => el('tr', {},
+      el('td', { class: 'mono', text: b.file }),
+      el('td', { text: b.pages === null || b.pages === undefined ? '?' : String(b.pages) }),
+      el('td', { text: (b.scopes || []).join(', ') || '—' }),
+      el('td', { text: fmtBytes(b.bytes) || '—' }),
+      el('td', { text: timeAgo(b.mtime) || '—' }),
+      el('td', {}, el('div', { class: 'row', style: 'gap:4px' },
+        el('a', { class: 'btn btn-secondary btn-sm', href: `/api/export/download?file=${encodeURIComponent(b.file)}`, download: b.file, text: 'baixar' }),
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'importar', onclick: () => { PENDING_BUNDLE = b.file; location.hash = 'import'; } }),
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'excluir', onclick: () => confirmModal({
+          title: `Excluir ${b.file}`,
+          message: `O arquivo ${b.file} será apagado de ${state.exportsDir}. O que já foi importado no ai-memory não muda.`,
+          word: b.file,
+          danger: true,
+          onConfirm: async () => {
+            try {
+              await api('/api/export/delete', { method: 'POST', body: { file: b.file, confirm: b.file } });
+              toast('bundle excluído');
+              await load();
+            } catch (err) {
+              toast(err.message, 'err');
+            }
+          },
+        }) }),
+      )),
+    ));
+    const tbody = el('tbody', {}, ...rows);
+    bundlesCard.replaceChildren(
+      el('div', { class: 'row-between' },
+        el('strong', { text: 'Bundles na pasta de exports' }),
+        el('span', { class: 'chip', text: `${state.bundles.length} arquivo(s)` }),
+      ),
+      el('div', { class: 'small muted', text: 'Reimportar um bundle não duplica páginas (o ai-memory versiona por path). "importar" leva o arquivo já selecionado para a aba Importar.' }),
+      el('table', {}, el('thead', {}, el('tr', {},
+        el('th', { text: 'arquivo' }), el('th', { text: 'páginas' }), el('th', { text: 'escopos' }), el('th', { text: 'tamanho' }), el('th', { text: 'quando' }), el('th', {},
+        ))), tbody),
+    );
+  }
+
+  await load();
+};
+
+function exportHelpModal() {
+  modal({
+    title: 'Exportar bundle — como funciona',
+    wide: true,
+    bodyNode: el('div', { class: 'stack' },
+      helpSection('O que é o bundle', bullets([
+        'Um .tar.gz com as páginas de um ou mais escopos: manifest.json (escopo, path, kind, tier, tags, pinned e sha256 de cada página), README, _meta.md por escopo e os .md como estão no wiki.',
+        'A lista de páginas vem do SQLite do servidor (só as latest) e o conteúdo do wiki; arquivos que não são páginas (log-*.md, _pending/) ficam fora.',
+        'Por padrão as páginas cruas (sessões, logs, tier episodic) não entram — o botão do dry-run mostra quantas ficariam de fora.',
+        'O ai-memory versiona por path: importar o mesmo bundle de novo atualiza as páginas em vez de duplicá-las.',
+      ])),
+      helpSection('Como importar em outro servidor', bullets([
+        'Aba Importar → fonte "Bundle do ai-memory" → escolha o arquivo → Escanear → revisar item a item → Importar selecionados.',
+        'Para gravar em OUTRO servidor, mude "servidor de destino" para "outro servidor do ai-memory" e informe URL + token: nada é salvo no disco e o token local fica de fora.',
+        'Sem token no destino, nenhum Authorization é enviado.',
+        'Alternativa sem painel: extrair em <store>/wiki/ do destino e rodar `ai-memory reindex` com o servidor parado.',
+      ])),
+      helpSection('Onde ficam os arquivos', bullets([
+        'Pasta de exports do painel (AIM_APP_EXPORT_DIR, padrão <repo>/exports), gravados com permissão 600.',
+        'Cada bundle é verificado ao final: o painel relê o arquivo e confere o sha256 de cada página antes de dizer "pronto".',
       ])),
     ),
     actions: [{ label: 'Fechar' }],

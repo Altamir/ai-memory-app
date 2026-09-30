@@ -4,17 +4,33 @@ import { config } from './config.mjs';
 
 // Cliente MCP streamable-HTTP mínimo: initialize handshake + tools/call.
 // A sessão é reutilizada entre chamadas e re-negociada se o servidor a invalidar.
-
-const state = {
-  sessionId: null,
-  protocolVersion: null,
-  initPromise: null,
-  nextId: 1,
-};
+// O alvo padrão é o servidor do painel; um job de importação pode apontar para
+// outro servidor (importar um bundle em outra máquina) passando `target`.
 
 const PROTOCOL_VERSION = '2025-06-18';
 
-function authToken() {
+const sessions = new Map(); // url → { sessionId, protocolVersion, initPromise }
+
+function sessionFor(url) {
+  let state = sessions.get(url);
+  if (!state) {
+    state = { sessionId: null, protocolVersion: null, initPromise: null };
+    sessions.set(url, state);
+  }
+  return state;
+}
+
+/** Alvo de uma chamada: `{ url, token }`; sem target, o servidor do painel. */
+function resolveTarget(target) {
+  const remote = Boolean(target?.url);
+  const url = String(target?.url || config.serverUrl).replace(/\/+$/, '');
+  return { url, token: target?.token || null, remote };
+}
+
+function authToken({ token, remote }) {
+  // token local nunca vai para um servidor remoto: só o token informado na tela
+  if (token) return String(token).trim();
+  if (remote) return null;
   try {
     return fs.readFileSync(path.join(config.dataDir, 'auth-token'), 'utf8').trim();
   } catch {
@@ -22,25 +38,27 @@ function authToken() {
   }
 }
 
-function headers() {
+function headers(state, resolved) {
   const h = {
     'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream',
   };
-  const token = authToken();
-  if (token) h.Authorization = `Bearer ${token}`;
+  const bearer = authToken(resolved);
+  if (bearer) h.Authorization = `Bearer ${bearer}`;
   if (state.sessionId) h['Mcp-Session-Id'] = state.sessionId;
   if (state.protocolVersion) h['MCP-Protocol-Version'] = state.protocolVersion;
   return h;
 }
 
-async function post(body, { timeoutMs = 30_000 } = {}) {
+async function post(body, { timeoutMs = 30_000, target = null } = {}) {
+  const resolved = resolveTarget(target);
+  const state = sessionFor(resolved.url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${config.serverUrl}/mcp`, {
+    const res = await fetch(`${resolved.url}/mcp`, {
       method: 'POST',
-      headers: headers(),
+      headers: headers(state, resolved),
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -77,16 +95,18 @@ async function extractJsonRpc(res, id) {
   }
 }
 
-function resetSession() {
-  state.sessionId = null;
-  state.protocolVersion = null;
-  state.initPromise = null;
+let nextId = 1;
+
+function resetSession(target) {
+  sessions.delete(resolveTarget(target).url);
 }
 
-async function initialize() {
+async function initialize(target) {
+  const resolved = resolveTarget(target);
+  const state = sessionFor(resolved.url);
   if (state.initPromise) return state.initPromise;
   state.initPromise = (async () => {
-    const id = state.nextId++;
+    const id = nextId++;
     const res = await post({
       jsonrpc: '2.0',
       id,
@@ -96,7 +116,7 @@ async function initialize() {
         capabilities: {},
         clientInfo: { name: 'ai-memory-app', version: '0.1.0' },
       },
-    });
+    }, { target: resolved });
     if (!res.ok) {
       throw new Error(`initialize falhou com HTTP ${res.status}`);
     }
@@ -106,26 +126,26 @@ async function initialize() {
     const version = msg?.result?.protocolVersion;
     if (version) state.protocolVersion = version;
     // notificação initialized (sem resposta esperada)
-    await post({ jsonrpc: '2.0', method: 'notifications/initialized' }).catch(() => {});
+    await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, { target: resolved }).catch(() => {});
     return true;
   })();
   try {
     return await state.initPromise;
   } catch (err) {
-    resetSession();
+    resetSession(resolved);
     throw err;
   }
 }
 
-async function rpc(method, params, { timeoutMs = 60_000, retry = true } = {}) {
-  await initialize();
-  const id = state.nextId++;
-  const res = await post({ jsonrpc: '2.0', id, method, params }, { timeoutMs });
+async function rpc(method, params, { timeoutMs = 60_000, retry = true, target = null } = {}) {
+  await initialize(target);
+  const id = nextId++;
+  const res = await post({ jsonrpc: '2.0', id, method, params }, { timeoutMs, target });
   if (res.status === 404 || res.status === 400) {
     if (retry) {
       // sessão expirou: re-negocia e tenta uma vez
-      resetSession();
-      return rpc(method, params, { timeoutMs, retry: false });
+      resetSession(target);
+      return rpc(method, params, { timeoutMs, retry: false, target });
     }
     throw new Error(`servidor MCP recusou ${method} com HTTP ${res.status}`);
   }

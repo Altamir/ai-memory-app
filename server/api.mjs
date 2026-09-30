@@ -1,10 +1,13 @@
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import { runCliJson, runCli, stderrMessage } from './cli.mjs';
 import { recentPages, readPage, searchMemory, listScopes } from './reads.mjs';
 import { callTool } from './mcp.mjs';
 import { createJob, createRunnerJob, getJob, jobDetail, listJobs, subscribe } from './jobs.mjs';
 import { buildMaintenanceArgs, checkConfirmation, commandCatalog, previewArgs, confirmationFor, SPEC } from './spec.mjs';
-import { IMPORT_SOURCES, applyImport, getImportItem, importState, listImportSources, scanImportSource } from './import.mjs';
+import { IMPORT_SOURCES, applyBundleImport, applyImport, getImportItem, importState, listImportSources, scanImportSource } from './import.mjs';
+import { buildBundle, deleteBundle, listBundles, listStoreScopes, planBundle, resolveBundlePath } from './bundle.mjs';
 import { config } from './config.mjs';
 import { createSession, getSession, killSession, listSessions, removeSession, revealSession, runningSessionPids } from './pty.mjs';
 import { listHostSessions, isHostRunProcess, isProtectedPid } from './host-sessions.mjs';
@@ -235,7 +238,83 @@ export async function handleApi(req, res, url) {
       return json(res, 200, out);
     }
 
-    // ---- importação de memórias (Grok v1/v2, Kiro) ----
+    // ---- exportação: bundles de memórias ----
+    if (route === 'GET /api/export/sources') {
+      try {
+        const store = await listStoreScopes();
+        const bundles = await listBundles();
+        return json(res, 200, {
+          store: {
+            dir: store.dir,
+            wikiDir: store.wikiDir,
+            dbFile: store.dbFile,
+            available: store.available,
+            sqlite: store.sqlite,
+            note: store.note,
+            error: store.error || null,
+          },
+          scopes: store.scopes,
+          totals: store.totals,
+          exportsDir: bundles.dir,
+          bundles: bundles.bundles,
+          runtime: { bin: config.bin, dataDir: config.dataDir, serverUrl: config.serverUrl, cwd: process.cwd() },
+        });
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/export/plan') {
+      const body = await readJsonBody(req);
+      try {
+        const plan = await planBundle({ scopes: body.scopes, includeRaw: body.includeRaw === true, name: body.name });
+        return json(res, 200, plan);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/export/run') {
+      const body = await readJsonBody(req);
+      const scopes = Array.isArray(body.scopes) ? body.scopes.slice(0, 500) : [];
+      const includeRaw = body.includeRaw === true;
+      const name = body.name ? String(body.name).slice(0, 120) : null;
+      const job = createRunnerJob(`exportar bundle (${scopes.length || 'todos'} escopo(s))`, {
+        run: async ({ log }) => {
+          const out = await buildBundle({ scopes, includeRaw, name, log });
+          log('sys', `pronto: ${out.fileName} — importe na aba Importar, fonte "Bundle do ai-memory"\n`);
+        },
+      });
+      return json(res, 201, { id: job.id, scopes, includeRaw, name });
+    }
+    if (route === 'GET /api/export/download') {
+      const file = url.searchParams.get('file') || '';
+      let target;
+      try {
+        target = await resolveBundlePath(file);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+      const stat = fs.statSync(target);
+      res.writeHead(200, {
+        'Content-Type': 'application/gzip',
+        'Content-Length': stat.size,
+        'Content-Disposition': `attachment; filename="${path.basename(target)}"`,
+        'Cache-Control': 'no-store',
+      });
+      fs.createReadStream(target).pipe(res);
+      return;
+    }
+    if (route === 'POST /api/export/delete') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await deleteBundle(body.file, { confirm: body.confirm });
+        return json(res, 200, out);
+      } catch (err) {
+        if (err.code === 'NEEDS_CONFIRM') return json(res, 409, { error: err.message, needsConfirm: true, file: err.file });
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    // ---- importação de memórias (Grok v1/v2, Kiro, bundle do ai-memory) ----
     if (route === 'GET /api/import/sources') {
       try {
         return json(res, 200, await listImportSources());
@@ -246,7 +325,10 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/import/scan') {
       const body = await readJsonBody(req);
       try {
-        const out = await scanImportSource(String(body.source || ''), { includeRaw: body.includeRaw !== false });
+        const out = await scanImportSource(String(body.source || ''), {
+          includeRaw: body.includeRaw !== false,
+          bundleFile: body.bundleFile ? String(body.bundleFile) : undefined,
+        });
         return json(res, 200, out);
       } catch (err) {
         return json(res, 400, { error: err.message });
@@ -255,7 +337,10 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/import/item') {
       const body = await readJsonBody(req);
       try {
-        const item = await getImportItem(String(body.source || ''), String(body.key || ''), { includeRaw: body.includeRaw !== false });
+        const item = await getImportItem(String(body.source || ''), String(body.key || ''), {
+          includeRaw: body.includeRaw !== false,
+          bundleFile: body.bundleFile ? String(body.bundleFile) : undefined,
+        });
         return json(res, 200, item);
       } catch (err) {
         return json(res, 400, { error: err.message });
@@ -270,17 +355,16 @@ export async function handleApi(req, res, url) {
       const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string' && k).slice(0, 5000) : [];
       if (!keys.length) return json(res, 400, { error: 'selecione ao menos um item' });
       const dryRun = body.dryRun === true;
+      const overrides = body.overrides && typeof body.overrides === 'object' ? body.overrides : {};
+      const includeRaw = body.includeRaw !== false;
+      const bundleFile = body.bundleFile ? String(body.bundleFile) : undefined;
+      if (source === 'bundle' && !bundleFile) return json(res, 400, { error: 'escolha o arquivo do bundle' });
       const job = createRunnerJob(`import ${source}${dryRun ? ' (dry-run)' : ''}`, {
         run: async ({ log, job: runnerJob }) => {
-          await applyImport({
-            source,
-            keys,
-            overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : {},
-            includeRaw: body.includeRaw !== false,
-            dryRun,
-            jobId: runnerJob.id,
-            log,
-          });
+          const args = { keys, overrides, includeRaw, dryRun, jobId: runnerJob.id, log };
+          // o bundle escolhe o próprio apply: aceita arquivo e servidor de destino
+          if (source === 'bundle') await applyBundleImport({ ...args, bundleFile, server: body.server });
+          else await applyImport({ ...args, source });
         },
       });
       return json(res, 201, { id: job.id, source, total: keys.length, dryRun });

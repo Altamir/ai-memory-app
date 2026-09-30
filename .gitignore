@@ -3,6 +3,7 @@ node_modules/
 .import-state.json
 .protected-pids.json
 .skill-backups/
+exports/
 *.log
 .zcode/
 .DS_Store
