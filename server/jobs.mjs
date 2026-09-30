@@ -108,6 +108,58 @@ function register(job) {
   }
 }
 
+/**
+ * Job que não é um subprocesso único: `run({ log })` faz o trabalho (ex.: N
+ * escritas de página) e reporta progresso linha a linha. Mesmo stream/SSE dos
+ * jobs de spawn — o frontend usa `showJob` sem saber a diferença.
+ */
+export function createRunnerJob(label, { group = 'actions', run } = {}) {
+  const id = randomUUID();
+  const job = {
+    id,
+    command: label,
+    group,
+    displayArgs: [label],
+    status: 'running',
+    exitCode: null,
+    startedAt: Date.now(),
+    endedAt: null,
+    lines: [],
+    droppedLines: 0,
+    partial: { out: '', err: '' },
+    subscribers: new Set(),
+  };
+  register(job);
+
+  const log = (kind, text) => {
+    const body = String(text ?? '');
+    if (!body) return;
+    append(job, kind === 'err' || kind === 'sys' ? kind : 'out', body.endsWith('\n') ? body : `${body}\n`);
+  };
+
+  (async () => {
+    try {
+      await run({ log, job });
+      flushPartial(job);
+      job.status = 'ok';
+      job.exitCode = 0;
+      job.endedAt = Date.now();
+      append(job, 'sys', '— fim (ok) —\n');
+    } catch (err) {
+      flushPartial(job);
+      append(job, 'err', `erro: ${err.message || err}\n`);
+      job.status = 'error';
+      job.exitCode = 1;
+      job.endedAt = Date.now();
+      append(job, 'sys', '— fim (error) —\n');
+    }
+    for (const sub of job.subscribers) sub.end();
+    job.subscribers.clear();
+  })();
+
+  return job;
+}
+
 const MAX_LINE = 2000;
 // logs da CLI vêm com cores ANSI; o painel estiliza por classe, não por escape
 const ANSI = /\x1B\[[0-9;]*[A-Za-z]|\x1B\][^\x07]*\x07/g;

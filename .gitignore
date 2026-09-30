@@ -1,5 +1,6 @@
 node_modules/
 .sessions.json
+.import-state.json
 .protected-pids.json
 .skill-backups/
 *.log

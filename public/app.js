@@ -162,6 +162,7 @@ const TITLES = {
   mail: 'Handoffs e mensagens',
   sessions: 'Sessões run',
   memories: 'Memórias',
+  import: 'Importar memórias',
   skills: 'Skills dos harnesses',
 };
 
@@ -1835,6 +1836,637 @@ VIEWS.memories = async (main) => {
   await loadScopes();
   await runSearch();
 };
+
+// ---------- view: importar memórias (Grok / Kiro) ----------
+
+const IMPORT_STATUS = {
+  new: { cls: 'chip-info', label: 'novo' },
+  changed: { cls: 'chip-warn', label: 'alterado' },
+  same: { cls: 'chip-ok', label: 'já importado' },
+  duplicate: { cls: 'chip', label: 'duplicado' },
+  collision: { cls: 'chip-err', label: 'mesma página' },
+};
+const NO_TARGET = '∅';
+
+VIEWS.import = async (main) => {
+  const state = {
+    sources: [],
+    runtime: null,
+    links: [],
+    source: null,
+    scan: null,
+    query: '',
+    showRaw: true,
+    only: 'all',
+    selected: new Set(),
+    overrides: {},
+    busy: false,
+  };
+
+  const runtimeChips = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' });
+  const sourcesGrid = el('div', { class: 'grid', style: 'grid-template-columns: repeat(auto-fill, minmax(330px, 1fr))' });
+  const scanHost = el('div', { class: 'stack' });
+  const statusChip = el('span', { class: 'chip', text: 'idle' });
+  const logCard = el(
+    'div',
+    { class: 'card stack', style: 'display:none' },
+    el('div', { class: 'row-between' },
+      el('div', { class: 'row' }, el('strong', { text: 'Log da importação' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
+      el('div', { class: 'row' }, statusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); logCard.style.display = 'none'; } })),
+    ),
+    el('div', { class: 'log-panel' }),
+  );
+  const historyCard = el('div', { class: 'card stack' });
+
+  const headerCard = el('div', { class: 'card stack' },
+    el('div', { class: 'row-between' },
+      el('strong', { text: 'De onde vêm as memórias' }),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => loadSources() }),
+        el('button', { class: 'btn btn-secondary btn-sm', text: '? como funciona', onclick: importHelpModal }),
+      ),
+    ),
+    el('div', { class: 'small muted', text: 'O painel lê as memórias curadas do Grok e do Kiro no seu home, resolve o projeto de cada uma pelos vínculos do client-projects.json e grava páginas no ai-memory (via MCP, com a CLI como reserva). Nada é gravado antes de você revisar a lista: o scan é somente leitura e cada item pode ser aberto, redirecionado ou descartado.' }),
+    runtimeChips,
+  );
+
+  main.append(el('div', { class: 'stack' }, headerCard, sourcesGrid, scanHost, logCard, historyCard));
+
+  // ---- fontes ----
+
+  async function loadSources() {
+    sourcesGrid.replaceChildren(el('div', { class: 'empty', text: 'lendo fontes…' }));
+    let data;
+    try {
+      data = await api('/api/import/sources');
+    } catch (err) {
+      sourcesGrid.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro: ${err.message}` })));
+      return;
+    }
+    state.sources = data.sources || [];
+    state.runtime = data.runtime || null;
+    try {
+      state.links = (await api('/api/scopes')).scopes || [];
+    } catch {
+      state.links = [];
+    }
+    renderRuntime();
+    renderSources();
+    await renderHistory();
+  }
+
+  function renderRuntime() {
+    const rt = state.runtime;
+    if (!rt) return;
+    runtimeChips.replaceChildren(
+      el('span', { class: 'chip mono', text: `grok ${rt.grokDir}` }),
+      el('span', { class: 'chip mono', text: `kiro ${rt.kiroDir}` }),
+      el('span', { class: `chip ${rt.sqlite ? 'chip-ok' : 'chip-warn'}`, text: rt.sqlite ? 'sqlite3 ok (memórias do crew)' : 'sqlite3 ausente (crew fica de fora)' }),
+      el('span', { class: 'chip', text: `${rt.links} projeto(s) vinculado(s)` }),
+      rt.bin ? el('span', { class: 'chip mono', text: `escreve via ${'memory_write_page'} ou ${rt.bin} write-page` }) : null,
+    );
+  }
+
+  function renderSources() {
+    sourcesGrid.replaceChildren(...state.sources.map(sourceCard));
+    if (!state.sources.length) sourcesGrid.append(el('div', { class: 'empty', text: 'nenhuma fonte configurada' }));
+  }
+
+  function sourceCard(src) {
+    const last = src.lastRun;
+    return el('div', { class: 'card stack' },
+      el('div', { class: 'row-between' },
+        el('strong', { text: src.label }),
+        el('span', { class: `chip ${src.available ? 'chip-ok' : 'chip-err'}`, text: src.available ? 'disponível' : 'não encontrada' }),
+      ),
+      el('div', { class: 'mono small muted', text: src.root }),
+      el('div', { class: 'small muted', text: src.hint }),
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' },
+        el('span', { class: 'chip', text: `${src.counts.curated} entrada(s) curada(s)` }),
+        el('span', { class: 'chip', text: `${src.counts.raw} cru(s)` }),
+        last
+          ? el('span', { class: `chip ${last.failed ? 'chip-warn' : 'chip-ok'}`, text: last.dryRun ? `dry-run ${timeAgo(last.endedAt) || 'agora'} · ${last.planned} simulada(s)` : `último: ${timeAgo(last.endedAt) || 'agora'} · ${last.imported} importada(s)${last.failed ? ` · ${last.failed} falha(s)` : ''}` })
+          : el('span', { class: 'chip', text: 'nunca importado' }),
+      ),
+      src.warnings.length ? el('div', { class: 'small', style: 'color:var(--attention)', text: src.warnings.slice(0, 3).join(' · ') }) : null,
+      el('div', {}, el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: 'Escanear',
+        disabled: !src.available,
+        onclick: () => doScan(src.id),
+      })),
+    );
+  }
+
+  // ---- scan ----
+
+  async function doScan(id) {
+    state.source = id;
+    state.selected = new Set();
+    state.overrides = {};
+    state.scan = null;
+    state.busy = true;
+    scanHost.replaceChildren(el('div', { class: 'empty', text: `escaneando ${id}…` }));
+    let scan;
+    try {
+      scan = await api('/api/import/scan', { method: 'POST', body: { source: id } });
+    } catch (err) {
+      scanHost.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro no scan: ${err.message}` })));
+      state.busy = false;
+      return;
+    }
+    state.busy = false;
+    state.scan = scan;
+    // sugestão inicial: memória curada, nova/alterada e com destino resolvido
+    for (const it of scan.items) {
+      if (!it.raw && it.target && (it.status === 'new' || it.status === 'changed')) state.selected.add(it.key);
+    }
+    renderScan();
+  }
+
+  function effectiveGroup(item) {
+    const ov = state.overrides[item.key];
+    if (ov?.global) return '_global';
+    if (ov?.workspace && ov?.project) return `${ov.workspace}/${ov.project}`;
+    if (item.target?.global) return '_global';
+    if (item.target) return `${item.target.workspace}/${item.target.project}`;
+    return NO_TARGET;
+  }
+
+  function visibleItems() {
+    const q = state.query.trim().toLowerCase();
+    return (state.scan?.items || []).filter((it) => {
+      if (!state.showRaw && it.raw) return false;
+      if (state.only !== 'all' && it.status !== state.only) return false;
+      if (q && !`${it.title} ${it.suggested.path} ${it.key}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }
+
+  function chipFilter(label, value, count) {
+    const active = state.only === value;
+    return el('button', {
+      class: `chip chip-btn ${active ? 'chip-info' : ''}`,
+      text: `${label} ${count}`,
+      onclick: () => { state.only = active ? 'all' : value; renderScan(); },
+    });
+  }
+
+  function renderScan() {
+    if (!state.scan) return;
+    const scroll = main.scrollTop;
+    const s = state.scan.summary;
+    const items = visibleItems();
+    const groups = new Map();
+    for (const it of items) {
+      const g = effectiveGroup(it);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(it);
+    }
+    const order = [...groups.keys()].sort((a, b) => (a === '_global' ? -1 : b === '_global' ? 1 : a === NO_TARGET ? 1 : b === NO_TARGET ? -1 : a.localeCompare(b)));
+
+    const searchInput = el('input', { class: 'field', placeholder: 'filtrar por título, path ou chave…', autocomplete: 'off', value: state.query, style: 'max-width:340px' });
+    searchInput.addEventListener('input', () => { state.query = searchInput.value; renderScan(); });
+
+    const selectAll = () => { for (const it of items) state.selected.add(it.key); renderScan(); };
+    const clearAll = () => { for (const it of items) state.selected.delete(it.key); renderScan(); };
+
+    const selectedCount = [...state.selected].filter((k) => state.scan.items.some((i) => i.key === k)).length;
+    const chosen = state.scan.items.filter((i) => state.selected.has(i.key));
+    const counts = { novo: 0, alterado: 0, atualiza: 0, global: 0, proj: 0, noTarget: 0, raw: 0 };
+    for (const it of chosen) {
+      if (it.status === 'new') counts.novo += 1;
+      if (it.status === 'changed') counts.alterado += 1;
+      if (it.status === 'same') counts.atualiza += 1;
+      if (it.raw) counts.raw += 1;
+      const g = effectiveGroup(it);
+      if (g === '_global') counts.global += 1;
+      else if (g === NO_TARGET) counts.noTarget += 1;
+      else counts.proj += 1;
+    }
+
+    const actionBar = el('div', { class: 'imp-actions' },
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+        el('strong', { text: `${selectedCount} selecionado(s)` }),
+        counts.novo ? el('span', { class: 'chip chip-info', text: `${counts.novo} novo(s)` }) : null,
+        counts.alterado ? el('span', { class: 'chip chip-warn', text: `${counts.alterado} atualiza(ão/ções)` }) : null,
+        counts.atualiza ? el('span', { class: 'chip', text: `${counts.atualiza} reescrita(s)` }) : null,
+        counts.raw ? el('span', { class: 'chip', text: `${counts.raw} cru(s)` }) : null,
+        counts.noTarget ? el('span', { class: 'chip chip-err', text: `${counts.noTarget} sem destino — serão pulados` }) : null,
+      ),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'simular (dry-run)', disabled: !selectedCount, onclick: () => startImport(true) }),
+        el('button', { class: 'btn btn-primary btn-sm', text: 'Importar selecionados', disabled: !selectedCount, onclick: () => startImport(false) }),
+      ),
+    );
+
+    const groupNodes = order.map((g) => {
+      const list = groups.get(g);
+      const header = el('div', { class: 'imp-group' },
+        el('strong', { text: g === NO_TARGET ? 'sem destino (escolha um projeto)' : g === '_global' ? '_global (todos os projetos)' : g }),
+        el('span', { class: 'chip', text: `${list.length} item(ns)` }),
+        el('div', { class: 'row', style: 'gap:4px' },
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'marcar', onclick: () => { for (const it of list) state.selected.add(it.key); renderScan(); } }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'desmarcar', onclick: () => { for (const it of list) state.selected.delete(it.key); renderScan(); } }),
+        ),
+      );
+      if (g === NO_TARGET) header.append(targetPicker(list));
+      return el('div', { class: 'stack', style: 'gap:6px' }, header, ...list.map(itemRow));
+    });
+
+    scanHost.replaceChildren(
+      el('div', { class: 'card stack' },
+        el('div', { class: 'row-between', style: 'flex-wrap:wrap' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('strong', { text: `Scan: ${state.scan.source}` }),
+            el('span', { class: 'chip', text: `${s.total} item(ns)` }),
+            chipFilter('todos', 'all', s.total),
+            chipFilter('novos', 'new', s.new || 0),
+            chipFilter('alterados', 'changed', s.changed || 0),
+            chipFilter('já importados', 'same', s.same || 0),
+            chipFilter('duplicados', 'duplicate', s.duplicate || 0),
+            chipFilter('mesma página', 'collision', s.collision || 0),
+          ),
+          el('div', { class: 'row' },
+            el('label', { class: 'check' }, (() => { const cb = el('input', { type: 'checkbox' }); cb.checked = state.showRaw; cb.addEventListener('change', () => { state.showRaw = cb.checked; renderScan(); }); return cb; })(), 'mostrar itens crus (sessões/observações)'),
+          ),
+        ),
+        el('div', { class: 'row', style: 'flex-wrap:wrap' }, searchInput,
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'marcar visíveis', onclick: selectAll }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'limpar seleção', onclick: clearAll }),
+        ),
+        state.scan.warnings.length
+          ? el('div', { class: 'small', style: 'color:var(--attention)', text: `avisos: ${state.scan.warnings.slice(0, 4).join(' · ')}${state.scan.warnings.length > 4 ? ` (+${state.scan.warnings.length - 4})` : ''}` })
+          : null,
+        el('div', { class: 'small muted', text: 'itens crus (sessões, observações, diários, episódicos) entram desmarcados por padrão. "duplicado" = o mesmo conteúdo já foi importado por outra fonte; "mesma página" = outro item deste scan quer o mesmo path (importe um por vez).' }),
+      ),
+      groupNodes.length ? el('div', { class: 'stack' }, ...groupNodes) : el('div', { class: 'empty', text: 'nenhum item com os filtros atuais' }),
+      actionBar,
+    );
+    main.scrollTop = scroll;
+  }
+
+  function targetPicker(list) {
+    const sel = el('select', { class: 'field', style: 'max-width:360px' },
+      el('option', { value: '', text: 'escolher projeto…' }),
+      el('option', { value: '__global', text: '→ _global (todos os projetos)' }),
+      ...state.links.map((l) => el('option', { value: `${l.workspace}/${l.project}`, text: `${l.workspace} / ${l.project}${l.path ? ` — ${l.path}` : ''}` })),
+    );
+    return el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, sel,
+      el('button', {
+        class: 'btn btn-secondary btn-sm',
+        text: 'aplicar ao grupo',
+        onclick: () => {
+          if (!sel.value) return;
+          for (const it of list) {
+            if (sel.value === '__global') state.overrides[it.key] = { ...(state.overrides[it.key] || {}), global: true };
+            else {
+              const [workspace, project] = sel.value.split('/');
+              state.overrides[it.key] = { ...(state.overrides[it.key] || {}), workspace, project };
+            }
+          }
+          renderScan();
+        },
+      }),
+    );
+  }
+
+  function itemRow(it) {
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = state.selected.has(it.key);
+    cb.addEventListener('change', () => {
+      if (cb.checked) state.selected.add(it.key);
+      else state.selected.delete(it.key);
+      renderScan();
+    });
+    const st = IMPORT_STATUS[it.status] || { cls: 'chip', label: it.status };
+    const ov = state.overrides[it.key];
+    const adjusted = Boolean(ov && (ov.global || ov.workspace || ov.path || ov.kind || ov.tier || typeof ov.pinned === 'boolean'));
+    return el('div', { class: 'imp-item' },
+      el('label', { class: 'check', style: 'align-self:flex-start; margin-top:2px' }, cb),
+      el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('strong', { style: 'font-size:13px', text: it.title }),
+          el('span', { class: `chip ${st.cls}`, text: st.label }),
+          it.raw ? el('span', { class: 'chip chip-warn', text: 'cru' }) : null,
+          it.suggested.pinned ? el('span', { class: 'chip chip-info', text: 'pinned' }) : null,
+          el('span', { class: 'chip', text: `${it.suggested.kind} · ${it.suggested.tier}` }),
+        ),
+        el('div', { class: 'mono small muted', text: it.suggested.path }),
+        el('div', { class: 'small muted', style: 'opacity:.8', text: `${it.originKind} · ${it.originPath}` }),
+        el('div', { class: 'small muted', text: adjusted ? 'destino/opções ajustados na tela' : it.targetReason }),
+      ),
+      el('div', { class: 'row', style: 'gap:4px; align-self:flex-start' },
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'ver', onclick: () => openItem(it) }),
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'destino', onclick: () => openTarget(it) }),
+        el('button', { class: 'btn btn-secondary btn-sm', text: 'opções', onclick: () => openOptions(it) }),
+      ),
+    );
+  }
+
+  // ---- modais de item ----
+
+  async function openItem(it) {
+    const box = el('div', { class: 'stack' }, el('div', { class: 'empty', text: 'carregando conteúdo…' }));
+    modal({ title: it.title, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
+    let full;
+    try {
+      full = await api('/api/import/item', { method: 'POST', body: { source: state.source, key: it.key } });
+    } catch (err) {
+      box.replaceChildren(el('div', { class: 'small', text: `Erro: ${err.message}` }));
+      return;
+    }
+    const rt = state.runtime || {};
+    const target = effectiveGroup(it);
+    const place = target === '_global' ? '--workspace default --project _global' : target === NO_TARGET ? '(escolha um destino)' : `--workspace ${target.split('/')[0]} --project ${target.split('/')[1]}`;
+    const argv = `memory_write_page  path=${it.suggested.path}  scope=${target === '_global' ? 'global' : target}  kind=${it.suggested.kind}  tier=${it.suggested.tier}${it.suggested.pinned ? '  pinned' : ''}\n${rt.bin || 'ai-memory'} --data-dir ${rt.dataDir || '?'} write-page --path ${it.suggested.path} --body - ${place} --kind ${it.suggested.kind} --tier ${it.suggested.tier}${it.suggested.pinned ? ' --pinned' : ''}`;
+    let bodyHtml = null;
+    if (window.marked) {
+      try { bodyHtml = marked.parse(full.body || ''); } catch { bodyHtml = null; }
+    }
+    box.replaceChildren(
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+        el('span', { class: 'chip', text: target === NO_TARGET ? 'sem destino' : target }),
+        el('span', { class: 'chip', text: `${(full.body || '').length} chars` }),
+        el('span', { class: 'chip', text: full.originKind }),
+        el('span', { class: 'chip mono', text: it.suggested.path }),
+      ),
+      el('div', { class: 'small muted', text: `origem: ${full.originPath}` }),
+      bodyHtml ? el('div', { class: 'md-body', html: bodyHtml }) : el('div', { class: 'codeblock', text: full.body || '(vazio)' }),
+      helpSection('Como será gravado', el('div', { class: 'codeblock', text: argv })),
+    );
+  }
+
+  function openTarget(it) {
+    const current = effectiveGroup(it);
+    const radios = [];
+    const group = (value, label) => {
+      const radio = el('input', { type: 'radio', name: 'imp-target', value });
+      radio.checked = current === value;
+      radios.push(radio);
+      return el('label', { class: 'check' }, radio, label);
+    };
+    const sel = el('select', { class: 'field', style: 'max-width:380px' },
+      ...state.links.map((l) => el('option', { value: `${l.workspace}/${l.project}`, text: `${l.workspace} / ${l.project}${l.path ? ` — ${l.path}` : ''}` })),
+    );
+    const listValue = `${(it.target?.workspace || state.links[0]?.workspace || '')}/${(it.target?.project || state.links[0]?.project || '')}`;
+    if (state.links.some((l) => `${l.workspace}/${l.project}` === listValue)) sel.value = listValue;
+
+    const wsInput = el('input', { class: 'field', placeholder: 'workspace (digitado)', autocomplete: 'off', style: 'max-width:170px' });
+    const prInput = el('input', { class: 'field', placeholder: 'projeto (digitado)', autocomplete: 'off', style: 'max-width:200px' });
+
+    modal({
+      title: `Destino · ${it.title}`,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'small muted', text: it.target ? `sugestão do scan: ${it.targetReason}` : it.targetReason }),
+        group('__suggest', 'usar a sugestão do scan'),
+        group('_global', '→ _global (aparece em todos os projetos)'),
+        el('div', { class: 'stack', style: 'gap:4px' }, group('__list', 'projeto vinculado:'), sel),
+        el('div', { class: 'stack', style: 'gap:4px' }, group('__custom', 'workspace/projeto digitado:'), el('div', { class: 'row', style: 'flex-wrap:wrap' }, wsInput, prInput)),
+        group('__none', 'sem destino (não importar este item)'),
+      ),
+      actions: [
+        {
+          label: 'Salvar',
+          kind: 'primary',
+          onClick: (close) => {
+            const picked = radios.find((r) => r.checked)?.value || '__suggest';
+            const next = { ...(state.overrides[it.key] || {}) };
+            delete next.global;
+            delete next.workspace;
+            delete next.project;
+            if (picked === '_global') next.global = true;
+            else if (picked === '__list') {
+              const [workspace, project] = sel.value.split('/');
+              next.workspace = workspace;
+              next.project = project;
+            } else if (picked === '__custom') {
+              next.workspace = wsInput.value.trim();
+              next.project = prInput.value.trim();
+              if (!next.workspace || !next.project) {
+                delete next.workspace;
+                delete next.project;
+              }
+            } else if (picked === '__none') {
+              state.selected.delete(it.key);
+            }
+            if (Object.keys(next).length) state.overrides[it.key] = next;
+            else delete state.overrides[it.key];
+            close();
+            renderScan();
+          },
+        },
+      ],
+    });
+  }
+
+  function openOptions(it) {
+    const pathInput = el('input', { class: 'field', value: state.overrides[it.key]?.path || it.suggested.path, autocomplete: 'off' });
+    const kindSel = el('select', { class: 'field', style: 'max-width:160px' }, ...['fact', 'rule', 'decision', 'gotcha'].map((k) => el('option', { value: k, text: k })));
+    kindSel.value = state.overrides[it.key]?.kind || it.suggested.kind;
+    const tierSel = el('select', { class: 'field', style: 'max-width:160px' }, ...['working', 'episodic', 'semantic', 'procedural'].map((t) => el('option', { value: t, text: t })));
+    tierSel.value = state.overrides[it.key]?.tier || it.suggested.tier;
+    const pinCb = el('input', { type: 'checkbox' });
+    pinCb.checked = state.overrides[it.key]?.pinned ?? it.suggested.pinned;
+    modal({
+      title: `Opções · ${it.title}`,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'small muted', text: 'regra → _rules/<slug>.md (pinned), problema → gotchas/, resto → notes/imported/<fonte>/. Ajuste se a heurística errou.' }),
+        el('div', {}, el('label', { class: 'field-label', text: 'path no wiki' }), pathInput),
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px; align-items:flex-end' },
+          el('div', {}, el('label', { class: 'field-label', text: 'kind' }), kindSel),
+          el('div', {}, el('label', { class: 'field-label', text: 'tier' }), tierSel),
+          el('label', { class: 'check' }, pinCb, 'pinned'),
+        ),
+      ),
+      actions: [
+        {
+          label: 'Salvar',
+          kind: 'primary',
+          onClick: (close) => {
+            const next = { ...(state.overrides[it.key] || {}) };
+            next.path = pathInput.value.trim();
+            next.kind = kindSel.value;
+            next.tier = tierSel.value;
+            next.pinned = pinCb.checked;
+            state.overrides[it.key] = next;
+            close();
+            renderScan();
+          },
+        },
+      ],
+    });
+  }
+
+  // ---- importação ----
+
+  function startImport(dryRun) {
+    const chosen = (state.scan?.items || []).filter((i) => state.selected.has(i.key));
+    if (!chosen.length) return;
+    const byStatus = { new: 0, changed: 0, same: 0, duplicate: 0, collision: 0 };
+    let global = 0;
+    let proj = 0;
+    let noTarget = 0;
+    let raw = 0;
+    for (const it of chosen) {
+      byStatus[it.status] = (byStatus[it.status] || 0) + 1;
+      if (it.raw) raw += 1;
+      const g = effectiveGroup(it);
+      if (g === '_global') global += 1;
+      else if (g === NO_TARGET) noTarget += 1;
+      else proj += 1;
+    }
+    modal({
+      title: dryRun ? 'Simular importação (dry-run)' : `Importar ${chosen.length} item(ns)`,
+      wide: true,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('span', { class: 'chip chip-info', text: `${byStatus.new || 0} nova(s)` }),
+          el('span', { class: 'chip chip-warn', text: `${byStatus.changed || 0} com nova versão` }),
+          el('span', { class: 'chip', text: `${byStatus.same || 0} reescrita(s) sem mudança` }),
+          byStatus.duplicate ? el('span', { class: 'chip', text: `${byStatus.duplicate} duplicada(s)` }) : null,
+          byStatus.collision ? el('span', { class: 'chip chip-err', text: `${byStatus.collision} na mesma página` }) : null,
+          raw ? el('span', { class: 'chip', text: `${raw} cru(s)` }) : null,
+        ),
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('span', { class: 'chip', text: `${global} em _global` }),
+          el('span', { class: 'chip', text: `${proj} em projeto` }),
+          noTarget ? el('span', { class: 'chip chip-err', text: `${noTarget} sem destino — pulado(s)` }) : null,
+        ),
+        el('div', { class: 'small muted', text: dryRun ? 'O dry-run não grava nada: só lista o que cada item faria, no log.' : 'A gravação é página a página: itens com o mesmo path viram NOVAS versões da página existente (o ai-memory versiona, não duplica o arquivo). Falhas ficam isoladas por item no log.' }),
+        el('div', { class: 'small muted', text: `${chosen.slice(0, 8).map((i) => i.suggested.path).join(' · ')}${chosen.length > 8 ? ` … (+${chosen.length - 8})` : ''}` }),
+      ),
+      actions: [
+        {
+          label: dryRun ? 'Simular' : 'Importar',
+          kind: 'primary',
+          onClick: (close) => { close(); runApply(dryRun); },
+        },
+      ],
+    });
+  }
+
+  async function runApply(dryRun) {
+    if (state.busy) return;
+    state.busy = true;
+    const keys = [...state.selected];
+    const overrides = { ...state.overrides };
+    let started;
+    try {
+      started = await api('/api/import/apply', { method: 'POST', body: { source: state.source, keys, overrides, dryRun } });
+    } catch (err) {
+      state.busy = false;
+      toast(err.message, 'err');
+      return;
+    }
+    logCard.style.display = '';
+    logCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    toast(`import iniciado: ${started.total} item(ns)`);
+    showJob(started.id, logCard, statusChip, { scopeNote: `${started.total} item(ns) · ${state.source}` });
+    const watch = setInterval(async () => {
+      let j;
+      try {
+        j = await api(`/api/jobs/${started.id}`);
+      } catch {
+        clearInterval(watch);
+        state.busy = false;
+        return;
+      }
+      if (j.status === 'running') return;
+      clearInterval(watch);
+      state.busy = false;
+      toast(j.status === 'ok' ? `import concluído (${j.status})` : `import terminou com ${j.status}`, j.status === 'ok' ? 'ok' : 'err');
+      await loadSources();
+      if (state.source) await doScan(state.source);
+      await renderHistory();
+    }, 1500);
+  }
+
+  // ---- histórico ----
+
+  async function renderHistory() {
+    let data;
+    try {
+      data = await api('/api/import/state');
+    } catch (err) {
+      historyCard.replaceChildren(el('div', { class: 'small', text: `histórico indisponível: ${err.message}` }));
+      return;
+    }
+    const tbody = el('tbody');
+    if (!data.runs?.length) {
+      tbody.append(el('tr', {}, el('td', { colspan: '7', class: 'muted', text: 'nenhuma importação ainda' })));
+    }
+    for (const run of data.runs || []) {
+      tbody.append(el('tr', {},
+        el('td', { text: timeAgo(run.endedAt) || new Date(run.endedAt).toLocaleString() }),
+        el('td', {}, el('span', { class: 'chip', text: run.source }), run.dryRun ? el('span', { class: 'chip chip-warn', text: ' dry-run' }) : null),
+        el('td', { text: run.dryRun ? `${run.planned ?? 0} simulada(s)` : `${run.imported} importada(s)` }),
+        el('td', { class: run.failed ? 'mono' : 'mono muted', text: run.failed ? `${run.failed} falha(s)` : '—' }),
+        el('td', { class: 'mono muted', text: `${run.skipped || 0} ignorada(s)` }),
+        el('td', { text: fmtDuration((run.endedAt || 0) - (run.startedAt || 0)) }),
+        el('td', {}, run.jobId ? el('button', {
+          class: 'btn btn-secondary btn-sm',
+          text: 'ver log',
+          onclick: async () => {
+            logCard.style.display = '';
+            await showJob(run.jobId, logCard, statusChip, { scopeNote: run.source });
+            logCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          },
+        }) : null),
+      ));
+    }
+    historyCard.replaceChildren(
+      el('div', { class: 'row-between' },
+        el('strong', { text: 'Importações recentes' }),
+        el('div', { class: 'row' },
+          el('span', { class: 'chip', text: `${data.imported} página(s) registradas` }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => renderHistory() }),
+        ),
+      ),
+      el('table', { class: 'table' },
+        el('thead', {}, el('tr', {},
+          el('th', { text: 'quando' }), el('th', { text: 'fonte' }), el('th', { text: 'resultado' }), el('th', { text: 'falhas' }), el('th', { text: 'ignoradas' }), el('th', { text: 'duração' }), el('th', { text: '' }),
+        )),
+        tbody,
+      ),
+    );
+  }
+
+  await loadSources();
+};
+
+function importHelpModal() {
+  modal({
+    title: 'Importar memórias — como funciona',
+    wide: true,
+    bodyNode: el('div', { class: 'stack' },
+      helpSection('Fontes', bullets([
+        'Grok v1 (~/.grok/memory): MEMORY.md global e de cada projeto, divididos por seção (## ...). Sessões (sessions/*.md) entram como itens crus, desmarcados.',
+        'Grok v2 (~/.grok/memory-v2): um item por tópico (topics/*.md) do global e de cada workspace; observações da _inbox entram como crus.',
+        'Kiro (~/.kiro): steering (inclusion: always vira regra), memórias semantic do crew agrupadas por projeto, episodic agrupadas por dia e diários do crew.',
+        'knowledge.db do Kiro e implement-memory do Grok ficam fora: são biblioteca de documentos, não memória curada.',
+      ])),
+      helpSection('Destino de cada página', bullets([
+        'Tópicos globais do Grok (estilo, fluxo, VPS) e memórias sem projeto identificado vão para _global, o escopo reservado que aparece em todos os projetos.',
+        'Memórias de projeto aterrissam no projeto vinculado no client-projects.json (mesmo mapa da tela de Memórias), resolvido pelo caminho do projeto ou pelos caminhos indexados do workspace.',
+        'Sem projeto vinculado, o item aparece no grupo "sem destino" — escolha um projeto (ou _global) antes de importar.',
+      ])),
+      helpSection('Paths e tiers (heurística, ajustável por item)', bullets([
+        'Regra ("nunca", "sempre", "preferência", "estilo"...) → _rules/<slug>.md, kind rule, tier procedural, pinned.',
+        'Problema ("erro", "não funciona", "Is a directory"...) → gotchas/<slug>.md, kind gotcha.',
+        'O resto → notes/imported/<fonte>/<slug>.md, kind fact, tier semantic.',
+        'Cru (sessão/observação/diário) → tier episodic e desmarcado por padrão.',
+      ])),
+      helpSection('Segurança da operação', bullets([
+        'O scan é somente leitura — ele lê os arquivos das outras ferramentas e os .md são mostrados antes de qualquer gravação.',
+        'A gravação usa a tool MCP memory_write_page (com scope global) e cai para o binário da CLI (write-page --body -) se o MCP falhar; o log diz qual caminho foi usado por item.',
+        'Reimportar atualiza a página (o ai-memory versiona por path) — não cria arquivos duplicados. Duplicados entre fontes já vêm marcados.',
+        'Nada é importado sem destino: itens "sem destino" são pulados no lote.',
+      ])),
+    ),
+    actions: [{ label: 'Fechar' }],
+  });
+}
 
 // ---------- view: skills dos harnesses ----------
 

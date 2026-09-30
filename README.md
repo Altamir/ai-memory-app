@@ -22,7 +22,26 @@ npm start
 | **Handoffs** | Handoffs abertos entre sessões (aceitar consome, são single-use) e mailbox entre projetos (`message list/pop/cancel/send`). Envio via composer com **seletor de workspace/projeto** (escolha dos existentes ou digitação livre). |
 | **Sessões** | Inicia `ai-memory run {opencode,grok,claude}` num diretório de projeto, com workstream nova/existente (sugestões da CLI), `--yolo` e `--fresh`. **Diretório escolhível**: datalist com os projetos conhecidos + navegador de pastas (marca repositórios git, restrito ao home). Cada sessão é um **card**; clicar abre o terminal numa **janela flutuante** grande (82% da tela), arrastável pela barra de título e redimensionável pelo grip do canto — **várias janelas ao mesmo tempo**, em cascata; fechar a janela não encerra a sessão. Cards de sessões encerradas podem ser **excluídos** da lista (individualmente ou com "limpar encerradas", com confirmação). A lista **sobrevive a reinicializações do painel** (`.sessions.json`): os cards voltam marcados como "I/O perdido", já que o PTY não é restaurável — excluir quando não interessar mais. A seção **"Rodando fora do painel"** lista (via tabela de processos) os `ai-memory run` vivos iniciados no seu terminal, com pid/tty/harness e botões para **Encerrar** ou **Retomar no painel** — cria uma sessão do painel no mesmo diretório, sem `--fresh` (o harness restaura a conversa mais recente), e encerra o processo externo. Como o ai-memory segura um **lease do workstream por ~90s** mesmo após o processo morrer (409 Conflict), o endpoint orquestra: mata todo o run (launcher + harness), espera morrer, detecta o conflito pelo buffer, espera a expiração exata do lease e recria a sessão (pode levar alguns minutos). Diretórios sem `.git` não oferecem Retomar (o run falharia). Pids intocáveis podem ser listados em `.protected-pids.json` (array) — aparecem com 🔒 e o backend recusa encerrá-los. |
 | **Memórias** | Busca global (todos os projetos) ou por escopo, lista de páginas recentes por projeto e leitor de página renderizado em markdown com frontmatter/tags. |
+| **Importar** | Traz as memórias curadas de **outras ferramentas** para o ai-memory: Grok v1, Grok v2 e Kiro. Scan somente leitura, revisão item a item (com o markdown renderizado), ajuste de destino/opções e gravação página a página com log ao vivo — ver abaixo. |
 | **Skills dos harnesses** | Catálogo dos roots de Agent Skills (Claude Code, Agents, OpenCode, ZCode, Grok, Kiro, Devin): globais por harness e skills de projeto por workspace. Mostra cópias por root, cópia **desatualizada** (difere do catálogo gerenciado do ai-memory), instalação num harness (global ou projeto) com backup `.bak-*` e viewer de SKILL.md com a árvore de arquivos. Quando o mesmo nome existe em mais de um root, o botão **Cópias…** (e o chip **cópias diferentes**) abre o painel de conciliação — ver abaixo. |
+
+### Importar memórias (Grok e Kiro)
+
+O painel lê as memórias que **outras ferramentas** guardam no seu home e as grava no ai-memory. Tudo roda no host (o servidor Docker não vê `~/.grok` nem `~/.kiro`), e nada é gravado antes da sua revisão: o scan é somente leitura e cada item pode ser aberto, redirecionado ou descartado.
+
+| Fonte | O que entra |
+| --- | --- |
+| **Grok v1** (`~/.grok/memory`) | `MEMORY.md` global e de cada projeto, **divididos por seção** (`## …`); o `MEMORY.md` de projeto informa o caminho do repo no cabeçalho (`# Project Memory — <path>`). Sessões (`sessions/*.md`) entram como itens crus, desmarcados. |
+| **Grok v2** (`~/.grok/memory-v2`) | Um item por tópico (`topics/*.md`) do `global/` e de cada `workspaces/<slug>/`; observações da `_inbox` entram como crus. O projeto do workspace é resolvido pelos caminhos indexados no `index.sqlite` e, na falta, pelo nome do slug contra os vínculos. |
+| **Kiro** (`~/.kiro`) | Steering global e por projeto (`inclusion: always` vira regra em `_rules/`), `semantic_memory` do crew agrupada por projeto, `episodic_memories` agrupada por dia e os diários do `crew/workspace/memory/history`. A leitura do `memory.db` usa o `sqlite3` do sistema, sempre read-only; sem ele a fonte degrada para os markdown com aviso na tela. |
+
+Como cada item vira página:
+
+- **Destino**: tópicos globais (estilo, fluxo, VPS) e itens sem projeto identificado vão para o escopo reservado **`_global`**; memórias de projeto aterrissam no projeto vinculado no `client-projects.json` (mesmo mapa da aba Memórias), resolvido pelo caminho do projeto. Sem vínculo, o item cai no grupo "sem destino" e a tela pede a escolha — nada é importado sem destino.
+- **Path/tier** (heurística por título e corpo, ajustável por item): regra ("nunca", "sempre", "preferência", "estilo"…) → `_rules/<slug>.md`, `kind rule`, tier `procedural`, `pinned`; problema ("erro", "não funciona", "Is a directory"…) → `gotchas/<slug>.md`; o resto → `notes/imported/<fonte>/<slug>.md`, tier `semantic`. Itens crus (sessão/observação/diário/episódico) entram com tier `episodic` e **desmarcados**.
+- **Status**: `novo`, `alterado` (o mesmo item mudou desde o último import), `já importado` (idêntico), `duplicado` (o mesmo conteúdo já foi importado por outra fonte) e `mesma página` (dois itens do scan querem o mesmo path). O estado fica em `.import-state.json` na raiz do painel.
+- **Gravação**: item a item, via tool MCP `memory_write_page` (com `scope: global` quando for o caso) e, se o MCP falhar, pela CLI `write-page --body -` (stdin), registrando no log qual caminho foi usado por item. Reimportar atualiza a página — o ai-memory versiona por path, não duplica arquivo. Há um botão de **dry-run** que só lista o que cada item faria.
+- **Ficam de fora** (de propósito): `knowledge.db` do Kiro e `implement-memory/` do Grok — são biblioteca de documentos, não memória curada.
 
 ### Conciliar cópias diferentes da mesma skill
 
@@ -68,6 +87,9 @@ Duas ressalvas que a tela também mostra:
 | `AI_MEMORY_SERVER_URL` | `http://127.0.0.1:49374` | Servidor MCP/HTTP do ai-memory |
 | `AI_MEMORY_SKILLS_HOME` | `os.homedir()` | Home usado no scan dos roots de skills (isolamento em testes) |
 | `AI_MEMORY_SKILLS_BACKUP_DIR` | `<repo>/.skill-backups` | Onde a conciliação de cópias guarda o estado anterior dos destinos |
+| `AIM_IMPORT_GROK_DIR` | `~/.grok` | Raiz das memórias do Grok (v1 em `memory/`, v2 em `memory-v2/`) |
+| `AIM_IMPORT_KIRO_DIR` | `~/.kiro` | Raiz das memórias do Kiro (steering, crew, diários) |
+| `AIM_APP_IMPORT_FILE` | `<repo>/.import-state.json` | Estado do importador (fingerprints, destinos, histórico) |
 
 ## Testes
 
@@ -75,7 +97,7 @@ Duas ressalvas que a tela também mostra:
 npm test
 ```
 
-89 testes (`node --test`): o SPEC e a tela de manutenção (metadata completa de todo comando, escopo global vs projeto, injeção de `--workspace/--project`, confirmação digitada — inclusive a condicional do `reorg` —, preview de argv, catálogo), normalização das respostas do MCP, diretórios, **skills** (scan dos roots com symlink quebrado/root inexistente, instalação com backup, compare/diff/conciliação de cópias incluindo confirmação obrigatória, remoção de extras e containment no home), **diff de linhas** (Myers, hunks com contexto, CRLF, arquivo grande e limite de hunks), sessões e a integração do servidor HTTP (health, estáticos com bloqueio de path traversal, rejeição de comandos fora da whitelist, escopo na linha de comando, preview, ciclo de vida de job, SSE e as rotas de skills) — a integração roda com `AI_MEMORY_BIN=/bin/echo` e `AI_MEMORY_SKILLS_HOME` temporário, sem tocar no ai-memory nem nos roots reais.
+118 testes (`node --test`): o SPEC e a tela de manutenção (metadata completa de todo comando, escopo global vs projeto, injeção de `--workspace/--project`, confirmação digitada — inclusive a condicional do `reorg` —, preview de argv, catálogo), normalização das respostas do MCP, diretórios, **skills** (scan dos roots com symlink quebrado/root inexistente, instalação com backup, compare/diff/conciliação de cópias incluindo confirmação obrigatória, remoção de extras e containment no home), **diff de linhas** (Myers, hunks com contexto, CRLF, arquivo grande e limite de hunks), sessões, **importação** (parsing do Grok v1/v2 e do Kiro em fixtures, classificação em `_rules`/`gotchas`/`notes`, resolução de destino por path/slug, ciclo de status `novo → já importado → duplicado`, colisão de path, write via MCP com fake server e fallback da CLI com o corpo no stdin, rotas de scan/item/apply/dry-run/state e o runner job com log por linha) e a integração do servidor HTTP (health, estáticos com bloqueio de path traversal, rejeição de comandos fora da whitelist, escopo na linha de comando, preview, ciclo de vida de job, SSE e as rotas de skills) — a integração roda com `AI_MEMORY_BIN=/bin/echo` e `AI_MEMORY_SKILLS_HOME` temporário, sem tocar no ai-memory nem nos roots reais; o teste de importação usa fixtures próprias e um fake de MCP.
 
 ## Segurança
 

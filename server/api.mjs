@@ -2,8 +2,9 @@ import os from 'node:os';
 import { runCliJson, runCli, stderrMessage } from './cli.mjs';
 import { recentPages, readPage, searchMemory, listScopes } from './reads.mjs';
 import { callTool } from './mcp.mjs';
-import { createJob, getJob, jobDetail, listJobs, subscribe } from './jobs.mjs';
+import { createJob, createRunnerJob, getJob, jobDetail, listJobs, subscribe } from './jobs.mjs';
 import { buildMaintenanceArgs, checkConfirmation, commandCatalog, previewArgs, confirmationFor, SPEC } from './spec.mjs';
+import { IMPORT_SOURCES, applyImport, getImportItem, importState, listImportSources, scanImportSource } from './import.mjs';
 import { config } from './config.mjs';
 import { createSession, getSession, killSession, listSessions, removeSession, revealSession, runningSessionPids } from './pty.mjs';
 import { listHostSessions, isHostRunProcess, isProtectedPid } from './host-sessions.mjs';
@@ -232,6 +233,60 @@ export async function handleApi(req, res, url) {
       const scope = body.workspace && body.project ? { workspace: body.workspace, project: body.project } : null;
       const out = await searchMemory(body.query, body.limit, scope);
       return json(res, 200, out);
+    }
+
+    // ---- importação de memórias (Grok v1/v2, Kiro) ----
+    if (route === 'GET /api/import/sources') {
+      try {
+        return json(res, 200, await listImportSources());
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/import/scan') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await scanImportSource(String(body.source || ''), { includeRaw: body.includeRaw !== false });
+        return json(res, 200, out);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/import/item') {
+      const body = await readJsonBody(req);
+      try {
+        const item = await getImportItem(String(body.source || ''), String(body.key || ''), { includeRaw: body.includeRaw !== false });
+        return json(res, 200, item);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/import/apply') {
+      const body = await readJsonBody(req);
+      const source = String(body.source || '');
+      if (!IMPORT_SOURCES.some((s) => s.id === source)) {
+        return json(res, 400, { error: `fonte desconhecida: ${source || '(vazia)'}` });
+      }
+      const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string' && k).slice(0, 5000) : [];
+      if (!keys.length) return json(res, 400, { error: 'selecione ao menos um item' });
+      const dryRun = body.dryRun === true;
+      const job = createRunnerJob(`import ${source}${dryRun ? ' (dry-run)' : ''}`, {
+        run: async ({ log, job: runnerJob }) => {
+          await applyImport({
+            source,
+            keys,
+            overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : {},
+            includeRaw: body.includeRaw !== false,
+            dryRun,
+            jobId: runnerJob.id,
+            log,
+          });
+        },
+      });
+      return json(res, 201, { id: job.id, source, total: keys.length, dryRun });
+    }
+    if (route === 'GET /api/import/state') {
+      return json(res, 200, importState());
     }
 
     // ---- skills dos harnesses ----

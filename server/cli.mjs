@@ -19,15 +19,16 @@ export function cliEnv() {
 /**
  * Executa o binário ai-memory e resolve com { code, stdout, stderr, timedOut }.
  * stderr carrega os logs INFO da CLI; stdout é a saída do comando.
+ * `stdinText` (string) alimenta o stdin do processo (ex.: write-page --body -).
  */
-export function runCli(args, { timeoutMs = 120_000, cwd } = {}) {
+export function runCli(args, { timeoutMs = 120_000, cwd, stdinText } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
       child = spawn(config.bin, ['--data-dir', config.dataDir, ...args], {
         cwd,
         env: cliEnv(),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [stdinText === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       });
     } catch (err) {
       reject(err);
@@ -40,6 +41,12 @@ export function runCli(args, { timeoutMs = 120_000, cwd } = {}) {
       timedOut = true;
       child.kill('SIGKILL');
     }, timeoutMs);
+
+    if (stdinText !== undefined) {
+      // o processo pode morrer antes de ler (timeout/validação): EPIPE não é erro aqui
+      child.stdin.on('error', () => {});
+      child.stdin.end(stdinText);
+    }
 
     child.stdout.on('data', (d) => chunks.out.push(d));
     child.stderr.on('data', (d) => chunks.err.push(d));
