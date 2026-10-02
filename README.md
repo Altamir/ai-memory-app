@@ -1,8 +1,19 @@
 # ai-memory-app
 
-Painel web local para gerenciar o [ai-memory](https://github.com/akitaonrails/ai-memory): status, comandos de manutenção, sessões `ai-memory run` com terminal embutido e navegação/busca nas memórias.
+Painel web local para gerenciar o [ai-memory](https://github.com/akitaonrails/ai-memory): status, comandos de manutenção, sessões `ai-memory run` com terminal embutido, navegação e busca nas memórias, troca de servidor, importação e exportação de bundles e gestão de Agent Skills.
 
 Node puro, sem framework e sem build. Frontend vanilla com os tokens visuais do **zzportal** (coezzion).
+
+## Pré-requisitos
+
+| Precisa de | Para quê |
+| --- | --- |
+| **Node ≥ 22** | Rodar o painel. |
+| A CLI do [ai-memory](https://github.com/akitaonrails/ai-memory) | Toda a manutenção, as sessões `run` e a leitura das memórias saem de um subprocesso dela. O painel instala a release oficial do GitHub no primeiro uso (ver abaixo), mas se você já tem uma CLI em outro lugar do PATH, o botão **usar este caminho** reaproveita em vez de instalar. |
+| `sqlite3` no PATH | **Importar** memórias do Grok/Kiro e **exportar** bundles: o painel lista as páginas consultando o `memory.sqlite` com o `sqlite3` do sistema, em modo read-only. Sem ele, a importação degrada para os markdown (com aviso na tela) e a exportação fica indisponível. |
+| `curl` e `tar` no PATH | Só para a instalação automática da CLI. |
+
+O painel não sobe servidor de ai-memory: ele fala com um que já esteja rodando (Docker, `ai-memory serve` ou uma máquina remota) e é configurado no primeiro uso.
 
 ## Rodar
 
@@ -29,14 +40,14 @@ Depois disso o dashboard volta ao normal; para trocar de servidor ou reapontar o
 | Aba | O que faz |
 | --- | --- |
 | **Painel** | Métricas do servidor (`ai-memory status --json`): páginas, sessões, observações, spool, providers de LLM/embeddings, armazenamento. Três cartões lado a lado: **Servidor** (URL, bind, data-dir e DB *do lado do servidor*), **CLI e dados locais** (`GET /api/setup`): binário da CLI e versão, data-dir do cliente com a presença de `auth-token`/`client-projects.json`/`config.toml`, e o volume do store (`AIM_STORE_DIR`) com wiki+db — o que existe nesta máquina, não no servidor; **Armazenamento** (tamanhos do banco). |
-| **Manutenção** | Executa a CLI do ai-memory. A tela é **gerada do catálogo do servidor** (`server/spec.mjs` é a única fonte): grupos Diagnóstico, Ações, Pesados, Backup e recuperação, Git e portabilidade e Zona de perigo, com 23 comandos — `doctor`, `curator`, `auto-improve-report`, `audit-contamination`, `lint`, `llm-test`, `forget-sweep`, `finalize-session`, `embed`, `reorg`, `backfill`, `bootstrap`, `backup`, `checkpoints`, `restore-page`, `restore`, `commit`, `export-okf`, `compact`, `reindex`, `purge-project`, `purge-session`, `reset`. Cada card mostra **escopo** (`global` ou um projeto), **efeitos** em chips (`somente leitura`, `escreve no store`, `apaga dados`, `consome tokens`, `bloqueia escritas`) e um botão **?** que abre o que o comando faz, os efeitos colaterais por extenso, onde ele age e a **linha de comando exata** (com `--data-dir`). Antes de executar, a tela valida as opções e, nos destrutivos, pede para **digitar o nome do comando** mostrando a linha e os efeitos. Log ao vivo via SSE e histórico das execuções. |
+| **Manutenção** | Executa a CLI do ai-memory. A tela é **gerada do catálogo do servidor** (`server/spec.mjs` é a única fonte): grupos Diagnóstico e leitura, Ações, Pesados (podem levar minutos), Backup e recuperação, Git e portabilidade e Zona de perigo, com 23 comandos — `doctor`, `curator`, `auto-improve-report`, `audit-contamination`, `lint`, `llm-test`, `forget-sweep`, `finalize-session`, `embed`, `reorg`, `backfill`, `bootstrap`, `backup`, `checkpoints`, `restore-page`, `restore`, `commit`, `export-okf`, `compact`, `reindex`, `purge-project`, `purge-session`, `reset`. Cada card mostra **escopo** (`global` ou um projeto), **efeitos** em chips (`somente leitura`, `escreve no store`, `apaga dados`, `consome tokens`, `bloqueia escritas`) e um botão **?** que abre o que o comando faz, os efeitos colaterais por extenso, onde ele age e a **linha de comando exata** (com `--data-dir`). Antes de executar, a tela valida as opções e, nos destrutivos, pede para **digitar o nome do comando** mostrando a linha e os efeitos. Log ao vivo via SSE e histórico das execuções. |
 | **Pendências** | Revisa propostas do auto-improve (`pending-writes`): ver diff, aprovar, rejeitar com motivo. |
 | **Handoffs** | Handoffs abertos entre sessões (aceitar consome, são single-use) e mailbox entre projetos (`message list/pop/cancel/send`). Envio via composer com **seletor de workspace/projeto** (escolha dos existentes ou digitação livre). |
 | **Sessões** | Inicia `ai-memory run {opencode,grok,claude}` num diretório de projeto, com workstream nova/existente (sugestões da CLI), `--yolo` e `--fresh`. **Diretório escolhível**: datalist com os projetos conhecidos + navegador de pastas (marca repositórios git, restrito ao home). Cada sessão é um **card**; clicar abre o terminal numa **janela flutuante** grande (82% da tela), arrastável pela barra de título e redimensionável pelo grip do canto — **várias janelas ao mesmo tempo**, em cascata; fechar a janela não encerra a sessão. Cards de sessões encerradas podem ser **excluídos** da lista (individualmente ou com "limpar encerradas", com confirmação). A lista **sobrevive a reinicializações do painel** (`.sessions.json`): os cards voltam marcados como "I/O perdido", já que o PTY não é restaurável — excluir quando não interessar mais. A seção **"Rodando fora do painel"** lista (via tabela de processos) os `ai-memory run` vivos iniciados no seu terminal, com pid/tty/harness e botões para **Encerrar** ou **Retomar no painel** — cria uma sessão do painel no mesmo diretório, sem `--fresh` (o harness restaura a conversa mais recente), e encerra o processo externo. Como o ai-memory segura um **lease do workstream por ~90s** mesmo após o processo morrer (409 Conflict), o endpoint orquestra: mata todo o run (launcher + harness), espera morrer, detecta o conflito pelo buffer, espera a expiração exata do lease e recria a sessão (pode levar alguns minutos). Diretórios sem `.git` não oferecem Retomar (o run falharia). Pids intocáveis podem ser listados em `.protected-pids.json` (array) — aparecem com 🔒 e o backend recusa encerrá-los. |
 | **Memórias** | Busca global (todos os projetos) ou por escopo, lista de páginas recentes por projeto e leitor de página renderizado em markdown com frontmatter/tags. O seletor de projetos usa o **inventário do servidor** (`GET /api/server-scopes` → `/admin/projects` do servidor, com o token do perfil): mostra os 39, 90, N projetos que o servidor tem — com contagem de páginas — e marca quais estão **vinculados a esta máquina** (`client-projects.json`). A nota no topo explica a diferença: máquina recém-instalada com servidor cheio mostra "N ainda só no servidor" e como vincular (hooks → `ai-memory run`). |
 | **Importar** | Traz as memórias de **outras ferramentas** e de **bundles do próprio ai-memory** para o ai-memory: Grok v1, Grok v2, Kiro e bundle `.tar.gz` (com destino remoto opcional). Scan somente leitura, revisão item a item (com o markdown renderizado), ajuste de destino/opções e gravação página a página com log ao vivo — ver abaixo. |
 | **Exportar** (sem menu fixo) | A exportação lê o **volume do store local** (`AIM_STORE_DIR`), então a entrada só aparece no dashboard — card *CLI e dados locais* — quando o volume existe de verdade (wiki + db presentes). Empacota as páginas de um ou mais escopos num **bundle `.tar.gz`** (manifesto + `.md` como estão no wiki) na pasta de exports, pronto para importar em outro servidor do ai-memory — ver abaixo. |
-| **Skills dos harnesses** | Catálogo dos roots de Agent Skills (Claude Code, Agents, OpenCode, ZCode, Grok, Kiro, Devin): globais por harness e skills de projeto por workspace. Mostra cópias por root, cópia **desatualizada** (difere do catálogo gerenciado do ai-memory), instalação num harness (global ou projeto) com backup `.bak-*` e viewer de SKILL.md com a árvore de arquivos. Quando o mesmo nome existe em mais de um root, o botão **Cópias…** (e o chip **cópias diferentes**) abre o painel de conciliação — ver abaixo.
+| **Skills** | Três sub-abas. **Globais** e **Workspaces**: catálogo dos roots de Agent Skills (Claude Code, Agents, OpenCode, ZCode, Grok, Kiro, Devin), com cópias por root, cópia **desatualizada** (difere do catálogo gerenciado do ai-memory), instalação num harness (global ou projeto) com backup `.bak-*` e viewer de SKILL.md com a árvore de arquivos. Quando o mesmo nome existe em mais de um root, o botão **Cópias…** (e o chip **cópias diferentes**) abre o painel de conciliação — ver abaixo. **Coleção (gestor)**: a sua cópia editável das skills, com versões e bundle próprio — ver abaixo. |
 | **Logs** | Cauda dos logs do ai-memory do lado local, com duas fontes: **CLI do ai-memory (cliente)** (`<data-dir>/logs/` do perfil ativo — `ai-memory.log.<data>`, `backfill.log`, `hook-drain.log`) e **Servidor local (store)** (`<storeDir>/logs/`, só quando o servidor ativo é o do ambiente). Seletor de arquivo, cauda de 200/1000/5000 linhas, filtro por substring e modo **Ao vivo** (SSE, novas linhas em ~2s, autoscroll). Leitura restrita às pastas de logs (realpath + prefix), com cores por nível. Logs de um servidor remoto ficam na outra máquina — o card avisa. |
 
 ### Trocar de servidor do ai-memory
@@ -65,7 +76,9 @@ Na mesma tela, a seção **MCP dos harnesses** reescreve a entrada `ai-memory` n
 
 A tela mostra, por harness, em que pé está: **em dia** (aponta para o servidor conectado), **aponta p/ outro** (instalado, mas em outro servidor), **não instalado** (a config existe sem a entrada) ou **sem config** (a ferramenta nem está configurada aqui).
 
-A escrita é delegada ao `ai-memory install-mcp --apply`, e não feita pelo painel: é a própria CLI que conhece o formato de cada cliente, é idempotente, **preserva os outros servidores MCP que você configurou** e grava um **backup** do arquivo antes de alterar. Cobrindo os 22 clientes que a CLI suporta — Claude Code, Codex, OpenCode (v1 e 2), Cursor, Claude Desktop, Gemini CLI, OpenClaw, Pi, Oh My Pi, Antigravity, Zero, ZCode, Devin, Grok, Kimi Code, Kiro, Command Code, Swival, VS Code Copilot, Zed e Muse.
+A escrita é delegada ao `ai-memory install-mcp --apply`, e não feita pelo painel: é a própria CLI que conhece o formato de cada cliente, é idempotente, **preserva os outros servidores MCP que você configurou** e grava um **backup** do arquivo antes de alterar. Cobrindo os 22 clientes que a CLI suporta — Claude Code, Codex CLI, OpenCode (v1 e 2), Cursor, Claude Desktop, Gemini CLI, OpenClaw, Pi, Oh My Pi, Antigravity CLI, Zero, ZCode, Devin, Grok, Kimi Code, Kiro, Command Code, Swival, VS Code Copilot, Zed e Muse.
+
+Hooks são um subconjunto: 17 desses 22 clientes os suportam. Claude Desktop, Swival, VS Code Copilot, Zed e Muse aparecem sem o botão **hooks** — não têm onde o painel instalaria.
 
 Depois de aplicar, **reinicie a ferramenta** para ela reler a config — o MCP já aberto na sessão continua no servidor antigo. O preview por harness (`GET /api/harness-mcp/<id>/preview`) mostra o trecho exato que a CLI geraria, sem escrever nada.
 
@@ -119,6 +132,31 @@ O mesmo nome em roots diferentes costuma ser a mesma skill em versões distintas
 
 Nada é gravado sem plano: `Conciliar…` faz um **dry-run** que lista, por destino, o que é criado/sobrescrito/removido e onde ficará o backup; destinos sem o marker gerenciado ou com remoção exigem **digitar `conciliar`** para confirmar. O estado anterior de cada destino é copiado inteiro para `.skill-backups/<timestamp>-<skill>-<harness>-<kind>/` (fora da árvore da skill, para não virar cópia no scan) e o resultado é mostrado por destino, com erros isolados por alvo. Roots `bundled`/`plugin`/catálogo são **somente leitura**: servem como origem, nunca como destino.
 
+### Coleção de skills (o gestor do painel)
+
+Os roots dos harnesses dizem o que **cada ferramenta** tem. A coleção é a resposta para a outra pergunta: a sua cópia, a que você edita e distribui. Ela vive fora de qualquer harness, em `~/.ai-memory-app/skills` (`AIM_APP_SKILLS_DIR`), como uma pasta por skill — `SKILL.md` mais os arquivos de recursos (`scripts/`, `references/`, `assets/`). Uma pasta só conta como skill se tiver `SKILL.md`.
+
+É a 3ª sub-aba de **Skills** (*Coleção (gestor)*), ao lado de *Globais* e *Workspaces*.
+
+| Ação | O que faz |
+| --- | --- |
+| **Importar do harness…** | Escolhe um harness de origem e lista tudo o que ele tem, cada item com `nova`, `na coleção · idêntica` ou `na coleção · diverge`. Só o que realmente faria algo vem marcado; idênticas são puladas no servidor. |
+| **Editar…** | Abre um arquivo editável num editor de texto. Salvar grava e avisa que o estado anterior virou uma versão. Um aviso aparece se o `SKILL.md` ficar sem o frontmatter. |
+| **Instalar…** | Instala a pasta inteira da coleção num harness, global ou num projeto. |
+| **Versões…** | Abre o histórico da skill. |
+| **restaurar** | Substitui a pasta pela versão escolhida. |
+
+**Versões.** Cada snapshot é uma **cópia completa** de todos os arquivos da skill — não é diff — guardada em `<coleção>/.versions/<skill>/<id>/`, com o índice em `index.json`. Os ids são inteiros crescentes (`v1`, `v2`, …) e cada entrada guarda data, nota, nº de arquivos, bytes, sha256 do `SKILL.md` e um `source`: `manual`, `antes de editar`, `antes de restaurar`, `antes de importar`, `antes de importar bundle`. Acima de **50 versões** a mais antiga é apagada do disco e do índice. Uma versão sem pasta no disco (podem ter sido removidas na mão) aparece marcada como tal, em vez de sumir.
+
+Um snapshot antes de escrever é automático: salvar um arquivo, importar por cima de uma cópia divergente e restaurar uma versão gravam todos o estado anterior antes. **Restaurar substitui a pasta inteira** — o que existe hoje e não existe na versão escolhida é perdido, e é por isso que o snapshot prévio existe. Uma skill que foi apagada da coleção mas ainda tem versões aparece como *excluída* e pode ser trazida de volta por qualquer uma delas.
+
+**Bundle de skills.** `Exportar bundle…` empacota a coleção inteira num `.tar.gz` na pasta de skills (`AIM_APP_SKILLS_EXPORT_DIR`, padrão `<repo>/exports/skills`). É outro formato do bundle de memórias — `ai-memory-skills-bundle` v1, entradas em `skills/<nome>/<arquivo>`, manifesto com origem, totais e o sha256 de cada arquivo. Diferenças que importam:
+
+- Exporta **tudo**, sem filtro por escopo nem dry-run; o de memórias escolhe escopos e simula antes.
+- **Não leva o histórico de versões** — só o estado atual. O `README.md` dentro do bundle avisa isso.
+- **Importar bundle…** é em duas fases: *Escanear* (só leitura, mostra o diff de cada skill) e só então *Importar selecionadas*. A opção **atualizar divergentes (estado atual vira versão)** vem ligada por padrão — desligada, uma skill divergente é pulada em vez de sobrescrita.
+- O de memórias tem exclusão com o nome digitado; **o de skills não tem rota de delete** — os arquivos se acumulam na pasta até você apagá-los.
+
 ### Escopo na Manutenção: global ou um projeto
 
 Os comandos **não** agem "no workspace que o painel abriu" — a divisão real é:
@@ -137,13 +175,16 @@ Duas ressalvas que a tela também mostra:
 
 ## Como se integra
 
-- **Leituras** (recent/search/read-page): via **MCP HTTP** do servidor (`AI_MEMORY_SERVER_URL`, default `http://127.0.0.1:49374/mcp`) com Bearer do arquivo `auth-token`; cai para a CLI se o MCP falhar. Escritas do importador usam o mesmo cliente, e um import de bundle pode apontar o cliente para **outro servidor** (URL + token da tela — o token local fica de fora).
+As rotas estão na [referência](#referência-de-rotas); o que importa aqui é **por onde cada dado sai**.
+
+- **Leituras** (recent/search/read-page): via **MCP HTTP** do servidor (`AI_MEMORY_SERVER_URL`, default `http://127.0.0.1:49374/mcp`) com Bearer do arquivo `auth-token`; cai para a CLI se o MCP falhar. O cliente é um JSON-RPC streamable-HTTP próprio (`server/mcp.mjs`, protocolo `2025-06-18`) — não há SDK. As ferramentas chamadas são `memory_status`, `memory_recent`, `memory_read_page`, `memory_query`, `memory_write_page`, `memory_handoff_accept` e `memory_install_self_routing`. A única chamada fora do `/mcp` é `GET <serverUrl>/admin/projects`, que monta o inventário de projetos do servidor.
+- **Escritas do importador** usam o mesmo cliente MCP; um import de bundle pode apontá-lo para **outro servidor** (URL + token da tela — o token local fica de fora).
 - **Manutenção e run**: subprocessos da CLI em `AI_MEMORY_BIN` (default `~/.local/bin/ai-memory`), sempre com `--data-dir` explícito e `AI_MEMORY_AUTH_TOKEN` injetado via env (lido de `<data-dir>/auth-token`).
-- **Servidores**: `GET /api/servers` (perfis + ativo), `POST /api/servers` (cadastra/edita), `POST /api/servers/activate` (troca o destino), `POST /api/servers/probe` (testa um destino sem trocar) e `DELETE /api/servers/<id>`. Ativar reescreve `config.bin/dataDir/serverUrl` em memória, então as rotas subsequentes já falam com o destino novo. A lista nunca devolve o token — só se existe.
-- **Logs**: `GET /api/logs` (fontes + arquivos), `GET /api/logs/content?source&file&tail&filter` (cauda, máx. 5000 linhas, filtro case-insensitive) e `GET /api/logs/stream?source&file&filter` (SSE, novas linhas a cada ~2s). Leitura restrita a `<dataDir>/logs/` e `<storeDir>/logs/` por realpath + prefix — traversal ou symlink para fora é recusado.
-- **MCP dos harnesses**: `GET /api/harness-mcp` (estado de cada cliente), `POST /api/harness-mcp/apply` (reescreve a entrada nos marcados, em lote) e `GET /api/harness-mcp/<id>/preview` (snippet sem escrever). A escrita é do `ai-memory install-mcp --apply` com o perfil ativo no env.
-- **Catálogo de manutenção**: `GET /api/maintenance` devolve comandos, grupos, escopos, flag metadata (defaults, obrigatórios, avançadas), efeitos colaterais e textos; `GET /api/maintenance/scope` devolve o projeto que a CLI resolveria pelo cwd do painel; `POST /api/jobs` com `preview: true` monta o argv sem executar (o `fill: true` tolera campos vazios e é o que o modal de ajuda usa).
-- **Exportação**: `GET /api/export/sources` (store + escopos com contagens + bundles), `POST /api/export/plan` (dry-run sem ler o wiki), `POST /api/export/run` (job que monta e verifica o bundle), `GET /api/export/download?file=` (attachment) e `POST /api/export/delete` (exige o nome digitado). Bundles só são lidos da pasta de exports ou de caminhos sob o home.
+- **SQLite**: não há biblioteca de banco no painel. O `sqlite3` do sistema é chamado em modo read-only (`-readonly -json`) para ler o `memory.sqlite` do store e os bancos do Grok/Kiro.
+- **Ativar um servidor** reescreve `config.bin/dataDir/serverUrl` em memória, então as rotas subsequentes já falam com o destino novo, sem reiniciar o processo. A lista de servidores nunca devolve o token — só se existe.
+- **MCP dos harnesses**: a escrita é delegada ao `ai-memory install-mcp --apply` com o perfil ativo no env, não feita pelo painel — é a CLI que conhece o formato de cada cliente, é idempotente e grava backup antes. `GET /api/harness-mcp/<id>/preview` mostra o trecho exato sem escrever nada. Os hooks seguem o mesmo caminho com `install-hooks --agent <id> --apply`.
+- **Manutenção**: `GET /api/maintenance` devolve comandos, grupos, escopos, flag metadata (defaults, obrigatórios, avançadas), efeitos colaterais e textos; `GET /api/maintenance/scope` devolve o projeto que a CLI resolveria pelo cwd do painel. `POST /api/jobs` com `preview: true` monta o argv sem executar (o `fill: true` tolera campos vazios e é o que o modal de ajuda usa), e `--workspace`/`--project` passam por validação antes de entrar no argv.
+- **Logs**: a leitura fica restrita a `<dataDir>/logs/` e `<storeDir>/logs/` por realpath + prefix — traversal ou symlink para fora é recusado.
 
 ### Variáveis de ambiente
 
@@ -154,14 +195,47 @@ Duas ressalvas que a tela também mostra:
 | `AI_MEMORY_BIN` | `~/.local/bin/ai-memory` | Binário da CLI |
 | `AI_MEMORY_DATA_DIR` | `~/Library/Application Support/ai-memory` | Data-dir da CLI (token, config) |
 | `AI_MEMORY_SERVER_URL` | `http://127.0.0.1:49374` | Servidor MCP/HTTP do ai-memory |
+| `AI_MEMORY_AUTH_TOKEN` | — | Token do perfil ativo. Ausente, o painel cai no `<data-dir>/auth-token`. Ver **Segurança**: com outro perfil ativo que não o do ambiente, o token do env é ignorado para não vazar para o destino novo. |
 | `AI_MEMORY_SKILLS_HOME` | `os.homedir()` | Home usado no scan dos roots de skills (isolamento em testes) |
 | `AI_MEMORY_SKILLS_BACKUP_DIR` | `<repo>/.skill-backups` | Onde a conciliação de cópias guarda o estado anterior dos destinos |
+| `AIM_APP_SKILLS_DIR` | `~/.ai-memory-app/skills` | Coleção de skills do painel (a sub-aba *Coleção (gestor)*) |
+| `AIM_APP_SKILLS_EXPORT_DIR` | `<repo>/exports/skills` | Onde os bundles de skills são gravados e de onde são listados |
 | `AIM_IMPORT_GROK_DIR` | `~/.grok` | Raiz das memórias do Grok (v1 em `memory/`, v2 em `memory-v2/`) |
 | `AIM_IMPORT_KIRO_DIR` | `~/.kiro` | Raiz das memórias do Kiro (steering, crew, diários) |
 | `AIM_APP_IMPORT_FILE` | `<repo>/.import-state.json` | Estado do importador (fingerprints, destinos, histórico) |
+| `AIM_APP_STATE_FILE` | `<repo>/.sessions.json` | Cards de sessão `run`, que sobrevivem a reinício do painel |
+| `AIM_APP_PROTECTED_PIDS` | — | Pids intocáveis, alternativa por env ao `.protected-pids.json` |
 | `AIM_STORE_DIR` | `~/.ai-memory-data/ai-memory` | Volume do servidor ai-memory (wiki + db) que o exportador lê |
 | `AIM_APP_EXPORT_DIR` | `<repo>/exports` | Onde os bundles exportados ficam (e de onde o importador lista) |
 | `AIM_APP_SERVERS_FILE` | `<repo>/.servers.json` | Perfis de servidor cadastrados e qual está ativo (modo `0600`) |
+
+`AIM_APP_PORT`, `AIM_APP_HOST` e as pastas do painel são lidas **uma vez**, no boot do processo — mude-as antes de `npm start`. Já `AI_MEMORY_SKILLS_HOME` e `AI_MEMORY_SKILLS_BACKUP_DIR` são lidas a cada uso.
+
+### Referência de rotas
+
+Tudo abaixo é servido em `127.0.0.1:4790` sob `/api`. Rota desconhecida devolve `404 {"error": "rota desconhecida: <METHOD> <path>"}`.
+
+| Família | Rotas |
+| --- | --- |
+| **Saúde** | `GET /api/health` |
+| **Logs** | `GET /api/logs` · `GET /api/logs/content?source&file&tail&filter` (tail 1..5000, padrão 400) · `GET /api/logs/stream?source&file&filter` (SSE) |
+| **Servidores** | `GET /api/servers` · `POST /api/servers` · `POST /api/servers/activate` · `POST /api/servers/probe` · `DELETE /api/servers/<id>` · `POST /api/servers/env` (traz de volta o ambiente removido) |
+| **MCP dos harnesses** | `GET /api/harness-mcp` · `POST /api/harness-mcp/apply` · `GET /api/harness-mcp/<id>/preview` |
+| **Hooks** | `POST /api/harness-hooks/apply` |
+| **Primeiro uso** | `GET /api/setup` · `GET /api/setup/cli-release` · `POST /api/setup/use-cli` · `POST /api/setup/init` · `POST /api/setup/install-cli` (**exige `confirm: true`**) |
+| **Dashboard e leitura** | `GET /api/status` · `GET /api/scopes` · `GET /api/server-scopes` · `GET /api/recent` · `GET /api/page` · `POST /api/search` |
+| **Export de memórias** | `GET /api/export/sources` · `POST /api/export/plan` (dry-run) · `POST /api/export/run` · `GET /api/export/download?file=` · `POST /api/export/delete` (exige o nome digitado) |
+| **Import** | `GET /api/import/sources` · `POST /api/import/scan` · `POST /api/import/item` · `POST /api/import/apply` · `GET /api/import/state` |
+| **Skills dos roots** | `GET /api/skills` · `/content` · `/workspaces` · `/workspace` · `/files` · `/file` · `/compare` · `/diff` · `POST /api/skills/reconcile` · `POST /api/skills/install` |
+| **Coleção de skills** | `GET /api/collection/skills` · `/content` · `/files` · `/file` · `/versions` · `/harness-skills` · `POST /api/collection/skills/file` · `/import` · `/import-batch` · `/version` · `/restore` · `/install` · `POST /api/collection/bundle/scan` · `/export` · `/import` · `GET /api/collection/bundle/download?file=` |
+| **Manutenção** | `GET /api/maintenance` · `GET /api/maintenance/scope` |
+| **Jobs** | `GET /api/jobs` · `POST /api/jobs` (`preview: true` monta o argv sem executar; `fill: true` tolera campos vazios) · `GET /api/jobs/<id>` · `GET /api/jobs/<id>/stream` (SSE) |
+| **Pendências** | `GET /api/pending` · `GET /api/pending/<key>/diff` · `/show` · `POST /api/pending/<key>/approve` · `/reject` |
+| **Handoffs e mensagens** | `GET /api/handoffs` · `POST /api/handoffs/accept` · `GET /api/messages?box=inbox\|outbox` · `POST /api/messages/pop` · `/cancel` · `/send` |
+| **Sessões** | `GET /api/sessions` · `POST /api/sessions` · `POST /api/sessions/<id>/kill` · `DELETE /api/sessions/<id>` · `GET /api/dirs?path` · `GET /api/workstreams` · `GET /api/host-sessions` · `POST /api/host-sessions/kill` · `/retomar` |
+| **Terminal (WebSocket)** | `GET /api/pty/<id>` via *upgrade* — o único que aceita upgrade. Envia `input` e `resize`; recebe `data` e `exit`. |
+
+Os jobs de exportação e de bundle de skills respondem `201` com `{ id }` e acompanham por `GET /api/jobs/<id>`; o frontend faz polling de 1s. Uma escrita que sobrescreva um `SKILL.md` sem o marker gerenciado responde **`409 { needsForce: true }`** — o 409 vem do servidor, não da tela. E `GET /api/collection/bundle/download` existe no servidor mas ainda não tem link na interface: os bundles de skills só saem da pasta de exports por enquanto (o de memórias tem o botão de download).
 
 ## Testes
 
@@ -169,7 +243,7 @@ Duas ressalvas que a tela também mostra:
 npm test
 ```
 
-157 testes (`node --test`): o SPEC e a tela de manutenção (metadata completa de todo comando, escopo global vs projeto, injeção de `--workspace/--project`, confirmação digitada — inclusive a condicional do `reorg` —, preview de argv, catálogo), normalização das respostas do MCP, diretórios, **skills** (scan dos roots com symlink quebrado/root inexistente, instalação com backup, compare/diff/conciliação de cópias incluindo confirmação obrigatória, remoção de extras e containment no home), **diff de linhas** (Myers, hunks com contexto, CRLF, arquivo grande e limite de hunks), sessões, **importação** (parsing do Grok v1/v2 e do Kiro em fixtures, classificação em `_rules`/`gotchas`/`notes`, resolução de destino por path/slug, ciclo de status `novo → já importado → duplicado`, colisão de path, write via MCP com fake server e fallback da CLI com o corpo no stdin, rotas de scan/item/apply/dry-run/state e o runner job com log por linha), **tar próprio** (round-trip com nome longo/GNU longname, descarte de diretórios e links, recusa de nomes com `..`, checksum e truncamento), **exportação de bundle** (escopos e contagens do SQLite, dry-run sem escrita, manifesto/README/_meta.md, exclusão de `log-*.md`/`_pending`/versões antigas, fallback do corpo pelo banco, scan com destino de origem e `_global`, sha256 adulterado, bundle do `export-okf`, containment de caminho e exclusão com confirmação, gravação no MCP local e em **outro servidor** com token da tela — provando que o token local não vaza) e a integração do servidor HTTP (health, estáticos com bloqueio de path traversal, rejeição de comandos fora da whitelist, escopo na linha de comando, preview, ciclo de vida de job, SSE, rotas de skills, rotas de export/bundle com download e delete confirmado) — a integração roda com `AI_MEMORY_BIN=/bin/echo` e `AI_MEMORY_SKILLS_HOME` temporário, sem tocar no ai-memory nem nos roots reais; os testes de importação/exportação usam fixtures próprias (store com SQLite criado no teste) e fakes de MCP.
+248 testes em 27 arquivos (`node --test`): o SPEC e a tela de manutenção (metadata completa de todo comando, escopo global vs projeto, injeção de `--workspace/--project`, confirmação digitada — inclusive a condicional do `reorg` —, preview de argv, catálogo), normalização das respostas do MCP, diretórios, **skills** (scan dos roots com symlink quebrado/root inexistente, instalação com backup, compare/diff/conciliação de cópias incluindo confirmação obrigatória, remoção de extras e containment no home), **coleção de skills** (import individual e em lote, versões com poda, restauração que preserva o estado anterior, edição de arquivo, backup na instalação forçada e nomes inválidos), **diff de linhas** (Myers, hunks com contexto, CRLF, arquivo grande e limite de hunks), **servidores** (perfis, ativação, token do ambiente, remoção e restauração do ambiente), **primeiro uso** (diagnóstico, instalação com checksum, realinhamento da CLI), **logs** (fontes, containment, cauda e filtro), **sessões** e **sessões fora do painel** (descoberta por tabela de processos, pids protegidos, retomada), **MCP dos harnesses** (preview, apply em lote, preservação dos outros servidores), **autenticação MCP** (401 sem token, token do env), importação (parsing do Grok v1/v2 e do Kiro em fixtures, classificação em `_rules`/`gotchas`/`notes`, resolução de destino por path/slug, ciclo de status `novo → já importado → duplicado`, colisão de path, write via MCP com fake server e fallback da CLI com o corpo no stdin, rotas de scan/item/apply/dry-run/state e o runner job com log por linha), **tar próprio** (round-trip com nome longo/GNU longname, descarte de diretórios e links, recusa de nomes com `..`, checksum e truncamento), **exportação de bundle** (escopos e contagens do SQLite, dry-run sem escrita, manifesto/README/_meta.md, exclusão de `log-*.md`/`_pending`/versões antigas, fallback do corpo pelo banco, scan com destino de origem e `_global`, sha256 adulterado, bundle do `export-okf`, containment de caminho e exclusão com confirmação, gravação no MCP local e em **outro servidor** com token da tela — provando que o token local não vaza) e a integração do servidor HTTP (health, estáticos com bloqueio de path traversal, rejeição de comandos fora da whitelist, escopo na linha de comando, preview, ciclo de vida de job, SSE, rotas de skills, rotas de coleção e rotas de export/bundle com download e delete confirmado) — a integração roda com `AI_MEMORY_BIN=/bin/echo` e `AI_MEMORY_SKILLS_HOME` temporário, sem tocar no ai-memory nem nos roots reais; os testes de importação/exportação usam fixtures próprias (store com SQLite criado no teste) e fakes de MCP.
 
 ## Segurança
 
@@ -177,5 +251,9 @@ npm test
 - Os destrutivos (`compact`, `reindex`, `purge-project`, `purge-session`, `restore`, `restore-page`, `reset`) mantêm `--confirm` na linha e exigem digitar o nome do comando; a exigência vem do SPEC (o frontend não mantém lista própria), e o modal mostra a linha exata e os efeitos colaterais antes.
 - **Escrita de skills**: instalação e conciliação só gravam em roots `user` (global do harness) ou `project` (dentro de um workspace) sob o home — paths passam por `realpath` e containment, nomes por regex, nada de shell. `bundled`, `plugin` e catálogo são somente leitura. Toda sobrescrita de SKILL.md sem o marker gerenciado e toda remoção de arquivo exigem a confirmação digitada (`conciliar`/`instalar`) no servidor, não só na tela.
 - **Bundles**: nada do bundle é extraído para o disco — o tar é lido em memória, entradas com `..`/absolutas são descartadas na leitura e o path de cada página passa pelas mesmas validações do importador. `download`/`delete` só alcançam a pasta de exports (delete exige digitar o nome do arquivo) e ler um bundle de fora exige caminho sob o home. Arquivos de bundle nascem com permissão `600` (memória privada). Servidor de destino remoto: o token digitado não é persistido nem logado, e o token local do painel nunca é enviado para o servidor remoto (o env do fallback da CLI sobrescreve com o token do destino).
+- **Coleção de skills, o que é garantido pelo servidor**: nome de skill por regex, path de arquivo com `..`/absoluto recusado na leitura, na escrita e de novo na gravação em lote; toda entrada de tar insegura é descartada e vira aviso; conteúdo com byte NUL é rejeitado; edição limitada a 256 KiB e bundle a 128 MiB; snapshot automático antes de qualquer escrita que sobrescreva (editar, importar por cima, restaurar); e instalação que sobrescreve um `SKILL.md` sem o marker gerenciado responde 409 e só segue com `force`, copiando a pasta existente para `.skill-backups/`.
+- **Coleção de skills, onde a garantia é só da tela** (vale saber antes de chamar algo por HTTP): restaurar uma versão pede a palavra `restaurar` **apenas no frontend** — a rota `POST /api/collection/skills/restore` não exige token nenhum. A conciliação de cópias, que é outro caminho de código, exige a palavra no servidor. As escritas de arquivo da coleção (`/file`, `/version`) também não têm dry-run; a rede de segurança é o snapshot automático, não uma confirmação.
+- **Leitura de bundle de skills** aceita caminho dentro da pasta de exports de skills, da pasta de exports de memórias **ou da raiz do repo** — mais amplo que a regra do bundle de memórias ("pasta de exports ou caminho sob o home"). É o motivo de um bundle nunca ser lido de um caminho arbitrário.
+- O painel **não autentica quem chega na porta**: não há token nem checagem de Origin nas rotas. É por isso que o bind é `127.0.0.1` e deve continuar assim — `AIM_APP_HOST=0.0.0.0` expõe todo o store, as sessões `run` e as escritas de skills para a rede.
 - O token de auth nunca é logado nem enviado ao frontend.
 - `node-pty` fixado em `1.0.0` (a 1.1.0 está falhando com `posix_spawnp failed` neste ambiente).
