@@ -5,6 +5,7 @@ import { WebSocketServer } from 'ws';
 import { config } from './config.mjs';
 import { handleApi } from './api.mjs';
 import { getSession, attachSocket } from './pty.mjs';
+import { initActiveServer } from './servers.mjs';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -104,10 +105,14 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(config.port, config.host, () => {
+  // o perfil ativo (se houver) reescreve bin/dataDir/serverUrl antes do log:
+  // o que o painel anuncia no boot é o servidor que ele realmente vai usar
+  const active = initActiveServer();
   console.log(`ai-memory-app em http://${config.host}:${config.port}`);
-  console.log(`  cli: ${config.bin}`);
-  console.log(`  data-dir: ${config.dataDir}`);
-  console.log(`  mcp: ${config.serverUrl}/mcp`);
+  console.log(`  servidor: ${active.name} (${active.url})`);
+  console.log(`  cli: ${active.bin}`);
+  console.log(`  data-dir: ${active.dataDir}`);
+  console.log(`  mcp: ${active.url}/mcp`);
 });
 
 server.on('error', (err) => {

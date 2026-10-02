@@ -4,6 +4,7 @@ import pty from 'node-pty';
 import { config } from './config.mjs';
 import { cliEnv } from './cli.mjs';
 import { saveSessions, loadSessions } from './session-store.mjs';
+import { getActiveServer } from './servers.mjs';
 
 // Sessões interativas: node-pty rodando `ai-memory run <harness>`.
 // O frontend conecta via WebSocket /api/pty/<id> para I/O e resize.
@@ -26,6 +27,9 @@ export function listSessions() {
       createdAt: s.createdAt,
       lostIo: Boolean(s.lostIo),
       endedNote: s.endedNote || null,
+      // servidor que a sessão nasceu: trocar de servidor no painel não move
+      // uma run já em andamento, e o card precisa dizer onde ela está
+      server: s.server || null,
     }));
 }
 
@@ -106,6 +110,7 @@ export function createSession({ harness, cwd, newWorkstream, workstream, yolo, f
   if (yolo) args.push('--yolo');
   if (fresh) args.push('--fresh');
 
+  const active = getActiveServer(); // congelado no nascimento da sessão
   const proc = pty.spawn(config.bin, args, {
     name: 'xterm-256color',
     cols: 120,
@@ -124,6 +129,9 @@ export function createSession({ harness, cwd, newWorkstream, workstream, yolo, f
     exitCode: null,
     createdAt: Date.now(),
     hidden: Boolean(hidden),
+    // congelado na criação: a run pertence ao servidor ativo agora (nome do
+    // perfil + url — o card mostra o nome, não a url crua)
+    server: { id: active.id, name: active.name, url: active.url, dataDir: active.dataDir },
     buffer: [],
     bufferSize: 0,
     sockets: new Set(),

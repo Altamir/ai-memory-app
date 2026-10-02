@@ -77,6 +77,9 @@ test.before(async () => {
       ...process.env,
       AIM_APP_PORT: String(PORT),
       AIM_APP_STATE_FILE: path.join(fx.tmp, 'sessions.json'),
+      // perfil de servidor isolado: sem isto, um .servers.json no root do repo
+      // (com o perfil ativo gravado) sobrepõe o data-dir deste fixture
+      AIM_APP_SERVERS_FILE: path.join(fx.tmp, 'servers.json'),
       AI_MEMORY_BIN: '/bin/echo',
       AI_MEMORY_SERVER_URL: 'http://127.0.0.1:1', // MCP morto: exercita o fallback CLI
       AI_MEMORY_DATA_DIR: fx.dataDir,

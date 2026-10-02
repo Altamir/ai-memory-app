@@ -22,6 +22,11 @@ function sessionFor(url) {
 
 /** Alvo de uma chamada: `{ url, token }`; sem target, o servidor do painel. */
 function resolveTarget(target) {
+  // idempotente: initialize já passa um target resolvido para post(), e
+  // re-resolver marcava remote=true, o que tirava o token local do header
+  if (target && typeof target === 'object' && typeof target.remote === 'boolean' && target.url) {
+    return target;
+  }
   const remote = Boolean(target?.url);
   const url = String(target?.url || config.serverUrl).replace(/\/+$/, '');
   return { url, token: target?.token || null, remote };
@@ -31,6 +36,11 @@ function authToken({ token, remote }) {
   // token local nunca vai para um servidor remoto: só o token informado na tela
   if (token) return String(token).trim();
   if (remote) return null;
+  // token do perfil ativo (server/servers.mjs) tem precedência
+  if (config.token) return String(config.token).trim();
+  // o env do processo só vale para o perfil do ambiente: com outro perfil
+  // ativo, o env pertence ao boot e ia parar no servidor errado (401/tenant errado)
+  if (config.activeIsEnv && process.env.AI_MEMORY_AUTH_TOKEN) return process.env.AI_MEMORY_AUTH_TOKEN.trim();
   try {
     return fs.readFileSync(path.join(config.dataDir, 'auth-token'), 'utf8').trim();
   } catch {

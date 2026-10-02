@@ -14,17 +14,62 @@ npm start
 
 ## O que tem
 
+### Primeiro uso: preparar o painel
+
+Numa máquina sem nada, o painel abre sozinho no **assistente de preparação** — e o chip do topo diz o que falta (`falta a CLI do ai-memory`, `servidor não responde`). A ordem é a da instalação:
+
+1. **CLI do ai-memory** — o painel oferece instalar a partir da release oficial do GitHub (baixa o `.tar.gz` da sua arquitetura, **confere o checksum SHA256** antes de extrair, guarda o binário anterior como `.bak-<data>`). Se já houver uma CLI em outro lugar do PATH, oferece **usar este caminho** sem instalar. A instalação só acontece com confirmação explícita; dar "não" não impede o resto. Após instalar, roda **`ai-memory init`** no data-dir do cliente — o passo 1 do setup oficial.
+2. **Servidor local ou remoto** — a pergunta só muda o que vem pré-preenchido: `local` sugere `http://127.0.0.1:49374` (o ai-memory nesta máquina, via Docker ou `ai-memory serve`); `remoto` pede a URL exposta e o token.
+3. **URL + token** — com **Testar conexão** antes de salvar. Salvar já cria o perfil e conecta.
+
+O wiring dos harnesses segue a docs dentro do painel: no gestor de servidores, a seção **MCP e hooks dos harnesses** aplica `install-mcp --apply` **e** `install-hooks --agent <id> --apply` (o botão **hooks** em cada harness suportado). Hooks é o que captura o trabalho e faz o projeto ser vinculado ao servidor no primeiro capture. O caminho preferido da docs continua valendo: `ai-memory run <harness>` auto-instala hooks + MCP na primeira execução.
+
+Depois disso o dashboard volta ao normal; para trocar de servidor ou reapontar o MCP dos harnesses, use o chip do topo. As rotas por trás: `GET /api/setup` (diagnóstico), `GET /api/setup/cli-release` (release oficial), `POST /api/setup/install-cli` (exige `confirm: true`), `POST /api/setup/use-cli` (realinha o caminho da CLI).
+
 | Aba | O que faz |
 | --- | --- |
-| **Painel** | Métricas do servidor (`ai-memory status --json`): páginas, sessões, observações, spool, providers de LLM/embeddings, armazenamento. |
+| **Painel** | Métricas do servidor (`ai-memory status --json`): páginas, sessões, observações, spool, providers de LLM/embeddings, armazenamento. Três cartões lado a lado: **Servidor** (URL, bind, data-dir e DB *do lado do servidor*), **CLI e dados locais** (`GET /api/setup`): binário da CLI e versão, data-dir do cliente com a presença de `auth-token`/`client-projects.json`/`config.toml`, e o volume do store (`AIM_STORE_DIR`) com wiki+db — o que existe nesta máquina, não no servidor; **Armazenamento** (tamanhos do banco). |
 | **Manutenção** | Executa a CLI do ai-memory. A tela é **gerada do catálogo do servidor** (`server/spec.mjs` é a única fonte): grupos Diagnóstico, Ações, Pesados, Backup e recuperação, Git e portabilidade e Zona de perigo, com 23 comandos — `doctor`, `curator`, `auto-improve-report`, `audit-contamination`, `lint`, `llm-test`, `forget-sweep`, `finalize-session`, `embed`, `reorg`, `backfill`, `bootstrap`, `backup`, `checkpoints`, `restore-page`, `restore`, `commit`, `export-okf`, `compact`, `reindex`, `purge-project`, `purge-session`, `reset`. Cada card mostra **escopo** (`global` ou um projeto), **efeitos** em chips (`somente leitura`, `escreve no store`, `apaga dados`, `consome tokens`, `bloqueia escritas`) e um botão **?** que abre o que o comando faz, os efeitos colaterais por extenso, onde ele age e a **linha de comando exata** (com `--data-dir`). Antes de executar, a tela valida as opções e, nos destrutivos, pede para **digitar o nome do comando** mostrando a linha e os efeitos. Log ao vivo via SSE e histórico das execuções. |
 | **Pendências** | Revisa propostas do auto-improve (`pending-writes`): ver diff, aprovar, rejeitar com motivo. |
 | **Handoffs** | Handoffs abertos entre sessões (aceitar consome, são single-use) e mailbox entre projetos (`message list/pop/cancel/send`). Envio via composer com **seletor de workspace/projeto** (escolha dos existentes ou digitação livre). |
 | **Sessões** | Inicia `ai-memory run {opencode,grok,claude}` num diretório de projeto, com workstream nova/existente (sugestões da CLI), `--yolo` e `--fresh`. **Diretório escolhível**: datalist com os projetos conhecidos + navegador de pastas (marca repositórios git, restrito ao home). Cada sessão é um **card**; clicar abre o terminal numa **janela flutuante** grande (82% da tela), arrastável pela barra de título e redimensionável pelo grip do canto — **várias janelas ao mesmo tempo**, em cascata; fechar a janela não encerra a sessão. Cards de sessões encerradas podem ser **excluídos** da lista (individualmente ou com "limpar encerradas", com confirmação). A lista **sobrevive a reinicializações do painel** (`.sessions.json`): os cards voltam marcados como "I/O perdido", já que o PTY não é restaurável — excluir quando não interessar mais. A seção **"Rodando fora do painel"** lista (via tabela de processos) os `ai-memory run` vivos iniciados no seu terminal, com pid/tty/harness e botões para **Encerrar** ou **Retomar no painel** — cria uma sessão do painel no mesmo diretório, sem `--fresh` (o harness restaura a conversa mais recente), e encerra o processo externo. Como o ai-memory segura um **lease do workstream por ~90s** mesmo após o processo morrer (409 Conflict), o endpoint orquestra: mata todo o run (launcher + harness), espera morrer, detecta o conflito pelo buffer, espera a expiração exata do lease e recria a sessão (pode levar alguns minutos). Diretórios sem `.git` não oferecem Retomar (o run falharia). Pids intocáveis podem ser listados em `.protected-pids.json` (array) — aparecem com 🔒 e o backend recusa encerrá-los. |
-| **Memórias** | Busca global (todos os projetos) ou por escopo, lista de páginas recentes por projeto e leitor de página renderizado em markdown com frontmatter/tags. |
+| **Memórias** | Busca global (todos os projetos) ou por escopo, lista de páginas recentes por projeto e leitor de página renderizado em markdown com frontmatter/tags. O seletor de projetos usa o **inventário do servidor** (`GET /api/server-scopes` → `/admin/projects` do servidor, com o token do perfil): mostra os 39, 90, N projetos que o servidor tem — com contagem de páginas — e marca quais estão **vinculados a esta máquina** (`client-projects.json`). A nota no topo explica a diferença: máquina recém-instalada com servidor cheio mostra "N ainda só no servidor" e como vincular (hooks → `ai-memory run`). |
 | **Importar** | Traz as memórias de **outras ferramentas** e de **bundles do próprio ai-memory** para o ai-memory: Grok v1, Grok v2, Kiro e bundle `.tar.gz` (com destino remoto opcional). Scan somente leitura, revisão item a item (com o markdown renderizado), ajuste de destino/opções e gravação página a página com log ao vivo — ver abaixo. |
-| **Exportar** | Empacota as páginas de um ou mais escopos num **bundle `.tar.gz`** (manifesto + `.md` como estão no wiki) na pasta de exports, pronto para importar em outro servidor do ai-memory — ver abaixo. |
-| **Skills dos harnesses** | Catálogo dos roots de Agent Skills (Claude Code, Agents, OpenCode, ZCode, Grok, Kiro, Devin): globais por harness e skills de projeto por workspace. Mostra cópias por root, cópia **desatualizada** (difere do catálogo gerenciado do ai-memory), instalação num harness (global ou projeto) com backup `.bak-*` e viewer de SKILL.md com a árvore de arquivos. Quando o mesmo nome existe em mais de um root, o botão **Cópias…** (e o chip **cópias diferentes**) abre o painel de conciliação — ver abaixo. |
+| **Exportar** (sem menu fixo) | A exportação lê o **volume do store local** (`AIM_STORE_DIR`), então a entrada só aparece no dashboard — card *CLI e dados locais* — quando o volume existe de verdade (wiki + db presentes). Empacota as páginas de um ou mais escopos num **bundle `.tar.gz`** (manifesto + `.md` como estão no wiki) na pasta de exports, pronto para importar em outro servidor do ai-memory — ver abaixo. |
+| **Skills dos harnesses** | Catálogo dos roots de Agent Skills (Claude Code, Agents, OpenCode, ZCode, Grok, Kiro, Devin): globais por harness e skills de projeto por workspace. Mostra cópias por root, cópia **desatualizada** (difere do catálogo gerenciado do ai-memory), instalação num harness (global ou projeto) com backup `.bak-*` e viewer de SKILL.md com a árvore de arquivos. Quando o mesmo nome existe em mais de um root, o botão **Cópias…** (e o chip **cópias diferentes**) abre o painel de conciliação — ver abaixo.
+| **Logs** | Cauda dos logs do ai-memory do lado local, com duas fontes: **CLI do ai-memory (cliente)** (`<data-dir>/logs/` do perfil ativo — `ai-memory.log.<data>`, `backfill.log`, `hook-drain.log`) e **Servidor local (store)** (`<storeDir>/logs/`, só quando o servidor ativo é o do ambiente). Seletor de arquivo, cauda de 200/1000/5000 linhas, filtro por substring e modo **Ao vivo** (SSE, novas linhas em ~2s, autoscroll). Leitura restrita às pastas de logs (realpath + prefix), com cores por nível. Logs de um servidor remoto ficam na outra máquina — o card avisa. |
+
+### Trocar de servidor do ai-memory
+
+O chip do topo (**`Servidor do ambiente · v2.4.0`**) é clicável e abre o gestor de servidores. A troca é do **painel inteiro**: dashboard, memórias, manutenção, sessões run e importação passam a falar com o servidor escolhido, sem reiniciar o processo.
+
+Cada servidor cadastrado tem **URL**, **data-dir do cliente** e, opcionalmente, binário da CLI e token:
+
+| Campo | Para quê |
+| --- | --- |
+| **Nome** | Como o servidor aparece na lista e no chip. |
+| **URL do servidor** | Endereço do ai-memory (`http://host:49374`). É o que o painel usa nas leituras MCP e o que a CLI recebe em `AI_MEMORY_SERVER_URL`. |
+| **Data-dir do cliente** | Pasta de cliente daquele servidor. É dela que sai o `auth-token` — o mesmo lugar de onde a CLI já lê. |
+| **Binário da CLI** | Opcional: só para usar um executável diferente do ambiente. |
+| **Token** | Opcional: tem precedência sobre o `auth-token` do data-dir acima. **Se digitado, é gravado em `.servers.json` (modo 0600, fora do git)**; em branco, o painel usa o `auth-token` do data-dir — e editar em branco preserva um token já gravado. |
+
+O botão **Testar conexão** faz um `memory_status` no destino **sem trocar** o servidor ativo. Os perfis ficam em `.servers.json` (modo `0600`) e o ativo sobrevive a reinicializações do painel.
+
+O botão **remover** funciona para qualquer servidor, inclusive o **Servidor do ambiente**. Remover o ambiente é seguro e reversível: ele some da lista, mas **continua sendo o destino do painel** — é ele quem vem das variáveis de ambiente, e o painel sempre precisa ter para onde falar. Ele aparece com o chip "removido da lista" e o botão **mostrar na lista** traz ele de volta. Editar, esse não dá: o ambiente é derivado do env, não é uma entrada da lista.
+
+Duas coisas que a troca **não** faz, de propósito: uma **sessão run já aberta não muda de servidor** (o card mostra em qual ela nasceu), e o **store em disco** (`AIM_STORE_DIR`) só vale como fallback de leitura quando o servidor ativo é o do ambiente — apontado para outra máquina, o painel prefere devolver vazio com o motivo em vez de listar as páginas do servidor errado.
+
+#### MCP dos harnesses
+
+Na mesma tela, a seção **MCP dos harnesses** reescreve a entrada `ai-memory` nas configs das ferramentas para apontarem ao servidor conectado. Você marca os harnesses que quer e o painel aplica de uma vez.
+
+A tela mostra, por harness, em que pé está: **em dia** (aponta para o servidor conectado), **aponta p/ outro** (instalado, mas em outro servidor), **não instalado** (a config existe sem a entrada) ou **sem config** (a ferramenta nem está configurada aqui).
+
+A escrita é delegada ao `ai-memory install-mcp --apply`, e não feita pelo painel: é a própria CLI que conhece o formato de cada cliente, é idempotente, **preserva os outros servidores MCP que você configurou** e grava um **backup** do arquivo antes de alterar. Cobrindo os 22 clientes que a CLI suporta — Claude Code, Codex, OpenCode (v1 e 2), Cursor, Claude Desktop, Gemini CLI, OpenClaw, Pi, Oh My Pi, Antigravity, Zero, ZCode, Devin, Grok, Kimi Code, Kiro, Command Code, Swival, VS Code Copilot, Zed e Muse.
+
+Depois de aplicar, **reinicie a ferramenta** para ela reler a config — o MCP já aberto na sessão continua no servidor antigo. O preview por harness (`GET /api/harness-mcp/<id>/preview`) mostra o trecho exato que a CLI geraria, sem escrever nada.
+
+ |
 
 ### Importar memórias (Grok, Kiro e bundle)
 
@@ -35,7 +80,7 @@ O painel lê as memórias que **outras ferramentas** guardam no seu home (e bund
 | **Grok v1** (`~/.grok/memory`) | `MEMORY.md` global e de cada projeto, **divididos por seção** (`## …`); o `MEMORY.md` de projeto informa o caminho do repo no cabeçalho (`# Project Memory — <path>`). Sessões (`sessions/*.md`) entram como itens crus, desmarcados. |
 | **Grok v2** (`~/.grok/memory-v2`) | Um item por tópico (`topics/*.md`) do `global/` e de cada `workspaces/<slug>/`; observações da `_inbox` entram como crus. O projeto do workspace é resolvido pelos caminhos indexados no `index.sqlite` e, na falta, pelo nome do slug contra os vínculos. |
 | **Kiro** (`~/.kiro`) | Steering global e por projeto (`inclusion: always` vira regra em `_rules/`), `semantic_memory` do crew agrupada por projeto, `episodic_memories` agrupada por dia e os diários do `crew/workspace/memory/history`. A leitura do `memory.db` usa o `sqlite3` do sistema, sempre read-only; sem ele a fonte degrada para os markdown com aviso na tela. |
-| **Bundle do ai-memory** (`.tar.gz`) | As páginas de um bundle exportado pela aba Exportar (ou por `ai-memory export-okf`) — ver a seção seguinte. O destino padrão de cada página é o mesmo escopo de origem do bundle; um bundle de outra máquina pode ser apontado por caminho e gravado em outro servidor. |
+| **Bundle do ai-memory** (`.tar.gz`) | As páginas de um bundle exportado pelo painel (ou por `ai-memory export-okf`) — ver a seção seguinte. O destino padrão de cada página é o mesmo escopo de origem do bundle; um bundle de outra máquina pode ser apontado por caminho e gravado em outro servidor. |
 
 Como cada item vira página:
 
@@ -47,7 +92,7 @@ Como cada item vira página:
 
 ### Exportar bundle (levar as memórias para outro servidor)
 
-A aba **Exportar** empacota as páginas dos escopos escolhidos num `.tar.gz` na pasta de exports do painel (`AIM_APP_EXPORT_DIR`, padrão `<repo>/exports/`, arquivos com permissão 600):
+A exportação (entrada no **dashboard**, card *CLI e dados locais* — aparece só quando o volume do store local existe) empacota as páginas dos escopos escolhidos num `.tar.gz` na pasta de exports do painel (`AIM_APP_EXPORT_DIR`, padrão `<repo>/exports/`, arquivos com permissão 600):
 
 ```
 manifest.json                          formato ai-memory-bundle v1: escopo, path, kind,
@@ -94,6 +139,9 @@ Duas ressalvas que a tela também mostra:
 
 - **Leituras** (recent/search/read-page): via **MCP HTTP** do servidor (`AI_MEMORY_SERVER_URL`, default `http://127.0.0.1:49374/mcp`) com Bearer do arquivo `auth-token`; cai para a CLI se o MCP falhar. Escritas do importador usam o mesmo cliente, e um import de bundle pode apontar o cliente para **outro servidor** (URL + token da tela — o token local fica de fora).
 - **Manutenção e run**: subprocessos da CLI em `AI_MEMORY_BIN` (default `~/.local/bin/ai-memory`), sempre com `--data-dir` explícito e `AI_MEMORY_AUTH_TOKEN` injetado via env (lido de `<data-dir>/auth-token`).
+- **Servidores**: `GET /api/servers` (perfis + ativo), `POST /api/servers` (cadastra/edita), `POST /api/servers/activate` (troca o destino), `POST /api/servers/probe` (testa um destino sem trocar) e `DELETE /api/servers/<id>`. Ativar reescreve `config.bin/dataDir/serverUrl` em memória, então as rotas subsequentes já falam com o destino novo. A lista nunca devolve o token — só se existe.
+- **Logs**: `GET /api/logs` (fontes + arquivos), `GET /api/logs/content?source&file&tail&filter` (cauda, máx. 5000 linhas, filtro case-insensitive) e `GET /api/logs/stream?source&file&filter` (SSE, novas linhas a cada ~2s). Leitura restrita a `<dataDir>/logs/` e `<storeDir>/logs/` por realpath + prefix — traversal ou symlink para fora é recusado.
+- **MCP dos harnesses**: `GET /api/harness-mcp` (estado de cada cliente), `POST /api/harness-mcp/apply` (reescreve a entrada nos marcados, em lote) e `GET /api/harness-mcp/<id>/preview` (snippet sem escrever). A escrita é do `ai-memory install-mcp --apply` com o perfil ativo no env.
 - **Catálogo de manutenção**: `GET /api/maintenance` devolve comandos, grupos, escopos, flag metadata (defaults, obrigatórios, avançadas), efeitos colaterais e textos; `GET /api/maintenance/scope` devolve o projeto que a CLI resolveria pelo cwd do painel; `POST /api/jobs` com `preview: true` monta o argv sem executar (o `fill: true` tolera campos vazios e é o que o modal de ajuda usa).
 - **Exportação**: `GET /api/export/sources` (store + escopos com contagens + bundles), `POST /api/export/plan` (dry-run sem ler o wiki), `POST /api/export/run` (job que monta e verifica o bundle), `GET /api/export/download?file=` (attachment) e `POST /api/export/delete` (exige o nome digitado). Bundles só são lidos da pasta de exports ou de caminhos sob o home.
 
@@ -113,6 +161,7 @@ Duas ressalvas que a tela também mostra:
 | `AIM_APP_IMPORT_FILE` | `<repo>/.import-state.json` | Estado do importador (fingerprints, destinos, histórico) |
 | `AIM_STORE_DIR` | `~/.ai-memory-data/ai-memory` | Volume do servidor ai-memory (wiki + db) que o exportador lê |
 | `AIM_APP_EXPORT_DIR` | `<repo>/exports` | Onde os bundles exportados ficam (e de onde o importador lista) |
+| `AIM_APP_SERVERS_FILE` | `<repo>/.servers.json` | Perfis de servidor cadastrados e qual está ativo (modo `0600`) |
 
 ## Testes
 

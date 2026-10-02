@@ -3,9 +3,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.mjs';
 
-/** Token lido a cada chamada (sobrevive a rotação sem reiniciar o app). */
+/**
+ * Token lido a cada chamada (sobrevive a rotação sem reiniciar o app).
+ * A precedência é a mesma da CLI: o token do perfil ativo, o env, e o
+ * <data-dir>/auth-token do servidor escolhido como fallback.
+ */
 export function cliEnv() {
   const env = { ...process.env };
+  // o perfil ativo manda a URL e o token: os jobs precisam falar com o mesmo
+  // servidor que o resto do painel, e não com o do ambiente
+  env.AI_MEMORY_SERVER_URL = config.serverUrl;
+  if (config.token) env.AI_MEMORY_AUTH_TOKEN = config.token;
+  else delete env.AI_MEMORY_AUTH_TOKEN;
   if (!env.AI_MEMORY_AUTH_TOKEN) {
     try {
       env.AI_MEMORY_AUTH_TOKEN = fs.readFileSync(path.join(config.dataDir, 'auth-token'), 'utf8').trim();
@@ -21,12 +30,14 @@ export function cliEnv() {
  * stderr carrega os logs INFO da CLI; stdout é a saída do comando.
  * `stdinText` (string) alimenta o stdin do processo (ex.: write-page --body -).
  * `env` sobrepõe variáveis (ex.: apontar a CLI para outro servidor).
+ * `bin`/`dataDir` sobrepõem o perfil ativo — é o que permite testar a conexão com
+ * um servidor que não é o conectado, sem trocar nada no painel.
  */
-export function runCli(args, { timeoutMs = 120_000, cwd, stdinText, env: extraEnv } = {}) {
+export function runCli(args, { timeoutMs = 120_000, cwd, stdinText, env: extraEnv, bin, dataDir } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(config.bin, ['--data-dir', config.dataDir, ...args], {
+      child = spawn(bin || config.bin, ['--data-dir', dataDir || config.dataDir, ...args], {
         cwd,
         env: extraEnv ? { ...cliEnv(), ...extraEnv } : cliEnv(),
         stdio: [stdinText === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],

@@ -35,6 +35,9 @@ function spawnServer(port, extraEnv = {}) {
       ...process.env,
       AIM_APP_PORT: String(port),
       AI_MEMORY_BIN: '/bin/echo', // jobs "rodam" echo: pipeline testado sem tocar no ai-memory
+      // perfil de servidor isolado: sem isto, um .servers.json no root do repo
+      // (com o perfil ativo gravado) redireciona o painel todo
+      AIM_APP_SERVERS_FILE: path.join(os.tmpdir(), `aim-test-servers-${port}.json`),
       ...extraEnv,
     },
     stdio: 'ignore',

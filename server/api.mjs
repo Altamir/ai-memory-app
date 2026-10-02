@@ -13,6 +13,13 @@ import { createSession, getSession, killSession, listSessions, removeSession, re
 import { listHostSessions, isHostRunProcess, isProtectedPid } from './host-sessions.mjs';
 import { listDirs } from './dirs.mjs';
 import { listSkills, getSkillContent, installSkill, listSkillFiles, readSkillFile, listWorkspaces, getWorkspaceSkills, compareSkillCopies, diffSkillCopies, reconcileSkillCopies, RECONCILE_CONFIRM } from './skills.mjs';
+import { listServers, saveServer, activateServer, deleteServer, restoreEnvServer, probeServer, setActiveBin } from './servers.mjs';
+import { projectInventory } from './scopes.mjs';
+import { listLogs, readLog, streamLog } from './logs.mjs';
+import { setupStatus, cliRelease } from './setup-check.mjs';
+import { installCli, initClientDir, installHooks } from './cli-install.mjs';
+import { listHarnessMcp, previewHarnessMcp, applyHarnessMcp, applyHarnessMcpMany } from './harness-mcp.mjs';
+import { listCollectionSkills, getCollectionContent, listCollectionFiles, readCollectionFile, writeCollectionFile, listCollectionVersions, importToCollection, importToCollectionBatch, listHarnessSkills, saveCollectionVersion, restoreCollectionVersion, installCollectionSkill, exportSkillsBundle, resolveSkillsBundlePath, scanSkillsBundle, importSkillsBundle } from './skills-collection.mjs';
 import { expandTilde } from './config.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -197,6 +204,181 @@ export async function handleApi(req, res, url) {
       return json(res, 200, { ok: true, ts: Date.now() });
     }
 
+    // ---- logs do ai-memory (cliente + servidor local) ----
+    if (route === 'GET /api/logs') {
+      return json(res, 200, listLogs());
+    }
+    if (route === 'GET /api/logs/content') {
+      const tail = Math.min(Math.max(Number(url.searchParams.get('tail')) || 400, 1), 5000);
+      try {
+        return json(res, 200, await readLog({
+          source: url.searchParams.get('source'),
+          file: url.searchParams.get('file'),
+          tail,
+          filter: url.searchParams.get('filter') || '',
+        }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/logs/stream') {
+      await streamLog({
+        source: url.searchParams.get('source'),
+        file: url.searchParams.get('file'),
+        filter: url.searchParams.get('filter') || '',
+      }, res);
+      return; // resposta fica aberta (SSE)
+    }
+
+    // ---- servidores: a qual ai-memory o painel está conectado ----
+    if (route === 'GET /api/servers') {
+      return json(res, 200, listServers());
+    }
+    if (route === 'POST /api/servers') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, saveServer({ ...body, id: body.id || undefined }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/servers/activate') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, activateServer(body.id));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/servers/probe') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, await probeServer(body));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    {
+      const m = pathname.match(/^\/api\/servers\/([\w-]+)$/);
+      if (m && method === 'DELETE') {
+        try {
+          return json(res, 200, deleteServer(m[1]));
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+      // restaurar o ambiente removido (id estável, fora da lista de cadastrados)
+      if (m && method === 'POST' && m[1] === 'env') {
+        try {
+          return json(res, 200, restoreEnvServer());
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+    }
+
+    // ---- MCP dos harnesses: apontam para o servidor conectado ----
+    if (route === 'GET /api/harness-mcp') {
+      return json(res, 200, { serverUrl: config.serverUrl, harnesses: await listHarnessMcp() });
+    }
+    if (route === 'POST /api/harness-mcp/apply') {
+      const body = await readJsonBody(req);
+      const ids = Array.isArray(body.harnesses)
+        ? body.harnesses.filter((h) => typeof h === 'string' && h).slice(0, 50)
+        : [String(body.harness || '')].filter(Boolean);
+      if (!ids.length) return json(res, 400, { error: 'selecione ao menos um harness' });
+      if (ids.length === 1) {
+        try {
+          return json(res, 200, { results: [await applyHarnessMcp(ids[0])] });
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+      // vários: um que falhe não pode impedir os outros de serem corrigidos
+      return json(res, 200, { results: await applyHarnessMcpMany(ids) });
+    }
+    {
+      const m = pathname.match(/^\/api\/harness-mcp\/([\w-]+)\/preview$/);
+      if (m && method === 'GET') {
+        try {
+          return json(res, 200, await previewHarnessMcp(m[1]));
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+    }
+
+    // ---- arranque: o que falta para o painel funcionar ----
+    if (route === 'GET /api/setup') {
+      return json(res, 200, await setupStatus());
+    }
+    if (route === 'GET /api/setup/cli-release') {
+      return json(res, 200, await cliRelease());
+    }
+    // CLI achada em outro lugar (PATH), mas o perfil aponta para onde ela não
+    // está: realinhar o `bin` resolve sem instalar nada
+    if (route === 'POST /api/setup/use-cli') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, setActiveBin(body.path));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    // `ai-memory init` no data-dir do cliente — passo 1 do setup oficial
+    if (route === 'POST /api/setup/init') {
+      const job = createRunnerJob('ai-memory init (data-dir do cliente)', {
+        group: 'actions',
+        run: async ({ log }) => {
+          const out = await initClientDir({ log });
+          if (!out.ok) throw new Error(out.error);
+        },
+      });
+      return json(res, 201, { id: job.id });
+    }
+    // `install-hooks --apply` — o passo que faz o projeto ser vinculado no
+    // primeiro capture (a docs manda junto com o install-mcp)
+    if (route === 'POST /api/harness-hooks/apply') {
+      const body = await readJsonBody(req);
+      const agents = Array.isArray(body.agents)
+        ? body.agents.filter((a) => typeof a === 'string' && a).slice(0, 30)
+        : [String(body.agent || '')].filter(Boolean);
+      if (!agents.length) return json(res, 400, { error: 'selecione ao menos um harness' });
+      const job = createRunnerJob(`install-hooks: ${agents.join(', ')}`, {
+        group: 'actions',
+        run: async ({ log }) => {
+          let failed = 0;
+          for (const agent of agents) {
+            const out = await installHooks({ agent, log });
+            if (!out.ok) {
+              failed += 1;
+              log('err', `${agent}: ${out.error}\n`);
+            }
+          }
+          if (failed) throw new Error(`${failed} de ${agents.length} harness(es) falharam — veja o log`);
+        },
+      });
+      return json(res, 201, { id: job.id, agents });
+    }
+    if (route === 'POST /api/setup/install-cli') {
+      const body = await readJsonBody(req);
+      // instalar escreve em disco: só com confirmação explícita. O destino é
+      // SEMPRE o bin do perfil ativo — `target` do cliente é ignorado, senão
+      // bastaria confirm:true para sobrescrever um caminho arbitrário
+      if (body.confirm !== true) {
+        return json(res, 400, { error: 'instalar a CLI exige confirm: true', needsConfirm: true });
+      }
+      const job = createRunnerJob('instalar a CLI do ai-memory', {
+        group: 'actions',
+        run: async ({ log }) => {
+          const out = await installCli({ confirm: true, log });
+          if (!out.ok) throw new Error(out.error);
+          log('sys', `pronto: ${out.path} (v${out.version})\n`);
+        },
+      });
+      return json(res, 201, { id: job.id });
+    }
+
     // ---- dashboard ----
     if (route === 'GET /api/status') {
       try {
@@ -210,6 +392,11 @@ export async function handleApi(req, res, url) {
     // ---- memórias ----
     if (route === 'GET /api/scopes') {
       return json(res, 200, listScopes());
+    }
+    // inventário completo: o que o servidor tem + o que desta máquina está
+    // vinculado (client-projects.json) e se os caminhos existem em disco
+    if (route === 'GET /api/server-scopes') {
+      return json(res, 200, await projectInventory());
     }
     if (route === 'GET /api/recent') {
       const scope = {
@@ -486,6 +673,175 @@ export async function handleApi(req, res, url) {
         if (err.code === 'NEEDS_FORCE') return json(res, 409, { error: err.message, needsForce: true });
         return json(res, 400, { error: err.message });
       }
+    }
+
+    // ---- gestor de skills: coleção do painel ----
+    // caminhos vêm de config (AIM_APP_SKILLS_DIR / AIM_APP_SKILLS_EXPORT_DIR)
+    if (route === 'GET /api/collection/skills') {
+      try {
+        return json(res, 200, await listCollectionSkills());
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/collection/skills/content') {
+      try {
+        return json(res, 200, getCollectionContent({
+          name: url.searchParams.get('name') || '',
+          version: url.searchParams.get('version') || undefined,
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/collection/skills/files') {
+      try {
+        return json(res, 200, listCollectionFiles({ name: url.searchParams.get('name') || '' }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/collection/skills/file') {
+      try {
+        return json(res, 200, readCollectionFile({
+          name: url.searchParams.get('name') || '',
+          rel: url.searchParams.get('rel') || 'SKILL.md',
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/skills/file') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, writeCollectionFile({
+          name: String(body.name || ''),
+          rel: String(body.rel || ''),
+          content: typeof body.content === 'string' ? body.content : '',
+          note: body.note ? String(body.note) : null,
+        }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/collection/skills/versions') {
+      try {
+        return json(res, 200, listCollectionVersions({ name: url.searchParams.get('name') || '' }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/skills/import') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await importToCollection({
+          name: String(body.name || ''),
+          harness: body.harness ? String(body.harness) : undefined,
+          kind: body.kind ? String(body.kind) : undefined,
+          ws: body.ws ? String(body.ws) : undefined,
+        });
+        return json(res, 200, out);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'GET /api/collection/harness-skills') {
+      try {
+        return json(res, 200, await listHarnessSkills({ harness: url.searchParams.get('harness') || '' }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/skills/import-batch') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, await importToCollectionBatch({ items: Array.isArray(body.items) ? body.items : [] }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/skills/version') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, saveCollectionVersion({ name: String(body.name || ''), note: body.note ? String(body.note) : null }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/skills/restore') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, restoreCollectionVersion({ name: String(body.name || ''), version: Number(body.version) }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/skills/install') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await installCollectionSkill({
+          name: String(body.name || ''),
+          harness: String(body.harness || ''),
+          scope: body.scope === 'project' ? 'project' : 'global',
+          projectDir: body.projectDir ? String(body.projectDir) : undefined,
+          force: body.force === true,
+        });
+        return json(res, 200, out);
+      } catch (err) {
+        if (err.code === 'NEEDS_FORCE') return json(res, 409, { error: err.message, needsForce: true });
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/bundle/scan') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, await scanSkillsBundle({ file: String(body.file || '') }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (route === 'POST /api/collection/bundle/export') {
+      const body = await readJsonBody(req);
+      const name = body.name ? String(body.name).slice(0, 120) : null;
+      const job = createRunnerJob('exportar bundle de skills', {
+        run: async ({ log }) => {
+          const out = await exportSkillsBundle({ name, log });
+          log('sys', `pronto: ${out.fileName} (${out.skills} skill(s), ${out.files} arquivo(s))\n`);
+        },
+      });
+      return json(res, 201, { id: job.id, name });
+    }
+    if (route === 'POST /api/collection/bundle/import') {
+      const body = await readJsonBody(req);
+      const file = String(body.file || '');
+      const names = Array.isArray(body.names) ? body.names.filter((n) => typeof n === 'string' && n).slice(0, 500) : [];
+      if (!names.length) return json(res, 400, { error: 'selecione ao menos uma skill do bundle' });
+      const update = body.update !== false;
+      const job = createRunnerJob(`importar bundle de skills (${names.length} skill(s))`, {
+        run: async ({ log }) => {
+          const out = await importSkillsBundle({ file, names, update, log });
+          log('sys', `pronto: ${out.created} criada(s), ${out.updated} atualizada(s), ${out.skipped} ignorada(s), ${out.errors} erro(s)\n`);
+        },
+      });
+      return json(res, 201, { id: job.id, file, total: names.length, update });
+    }
+    if (route === 'GET /api/collection/bundle/download') {
+      const file = url.searchParams.get('file') || '';
+      let target;
+      try {
+        target = await resolveSkillsBundlePath(file);
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+      const stat = fs.statSync(target);
+      res.writeHead(200, {
+        'Content-Type': 'application/gzip',
+        'Content-Length': stat.size,
+        'Content-Disposition': `attachment; filename="${path.basename(target)}"`,
+        'Cache-Control': 'no-store',
+      });
+      fs.createReadStream(target).pipe(res);
+      return;
     }
 
     // ---- jobs de manutenção ----

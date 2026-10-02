@@ -1,6 +1,9 @@
 node_modules/
 .sessions.json
+.servers.json
+.servers.json.bak
 .import-state.json
+.import-state.json.bak
 .protected-pids.json
 .skill-backups/
 exports/

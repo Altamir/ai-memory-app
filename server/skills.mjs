@@ -17,15 +17,15 @@ export const MANAGED_MARKER = '<!-- ai-memory-managed: routing-skill -->';
 export const RECONCILE_CONFIRM = 'conciliar';
 
 const MAX_SKILLS = 500;
-const MAX_CONTENT = 256 * 1024;
+export const MAX_CONTENT = 256 * 1024;
 const MAX_TEXT_FILE = 512 * 1024;
 const MAX_IMAGE_FILE = 5 * 1024 * 1024;
 const MAX_TREE = 300;
 const MAX_HASH_FILE = 1024 * 1024; // acima disso, compara só pelo tamanho
 const BACKUP_DIRNAME = '.skill-backups';
-const NAME_RE = /^[\w][\w.-]*$/;
+export const NAME_RE = /^[\w][\w.-]*$/;
 
-const IMAGE_MIME = {
+export const IMAGE_MIME = {
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -98,7 +98,7 @@ export function harnessTargets(home = resolveHome()) {
   ];
 }
 
-function parseFrontmatter(text) {
+export function parseFrontmatter(text) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text.slice(0, 8192));
   if (!m) return {};
   const out = {};
@@ -323,23 +323,32 @@ export async function getSkillContent({ name, harness, kind, home = resolveHome(
 /**
  * Instala uma skill em um harness. Gerenciadas vêm do catálogo do binário;
  * as outras são copiadas do primeiro root de usuário onde existirem.
+ * `sourceDir` instala um diretório completo (SKILL.md + recursos) — é o modo
+ * usado pelo gestor de skills ao instalar da coleção.
  * Sobrescrita só ocorre com o marker gerenciado no arquivo existente ou com force.
  */
-export async function installSkill({ name, scope = 'global', harness, projectDir, force = false, home = resolveHome(), managed } = {}) {
+export async function installSkill({ name, scope = 'global', harness, projectDir, force = false, home = resolveHome(), managed, sourceDir } = {}) {
   if (!name || !NAME_RE.test(name)) throw new Error('nome de skill inválido');
   const targets = harnessTargets(home);
   const target = targets.find((t) => t.id === harness);
   if (!target) throw new Error(`harness desconhecido: ${harness || '(vazio)'} — use ${targets.map((t) => t.id).join(', ')}`);
 
-  const catalog = managed ?? (await fetchManagedCatalog());
-  const meta = catalog.skills.get(name);
-  let content = meta?.content || null;
-  let source = meta ? { managed: true } : null;
-  if (!content) {
-    const src = scanAllLocations(home).find((l) => l.name === name && l.kind === 'user');
-    if (!src) throw new Error(`skill "${name}" não encontrada: não está no catálogo gerenciado nem em nenhum root de usuário`);
-    content = src.content;
-    source = { harness: src.harness, kind: src.kind, path: src.file };
+  let content = null;
+  let source = null;
+  if (sourceDir) {
+    if (!fs.existsSync(path.join(sourceDir, 'SKILL.md'))) throw new Error(`origem sem SKILL.md: ${sourceDir}`);
+    source = { collection: true, dir: sourceDir };
+  } else {
+    const catalog = managed ?? (await fetchManagedCatalog());
+    const meta = catalog.skills.get(name);
+    content = meta?.content || null;
+    source = meta ? { managed: true } : null;
+    if (!content) {
+      const src = scanAllLocations(home).find((l) => l.name === name && l.kind === 'user');
+      if (!src) throw new Error(`skill "${name}" não encontrada: não está no catálogo gerenciado nem em nenhum root de usuário`);
+      content = src.content;
+      source = { harness: src.harness, kind: src.kind, path: src.file };
+    }
   }
 
   let rootDir;
@@ -364,16 +373,33 @@ export async function installSkill({ name, scope = 'global', harness, projectDir
       err.code = 'NEEDS_FORCE';
       throw err;
     }
-    backup = `${skillFile}.bak-${Date.now()}`; // mesmo padrão de backup da CLI install-skills
-    fs.copyFileSync(skillFile, backup);
+    if (sourceDir) {
+      // diretório completo: backup da pasta inteira no root de backups (mesmo padrão da conciliação)
+      const stamp = new Date(Date.now()).toISOString().replace(/[:.]/g, '-');
+      backup = path.join(backupRootDir(), `${stamp}-${name}-${target.id}`);
+      fs.mkdirSync(backup, { recursive: true });
+      fs.cpSync(skillDir, backup, { recursive: true, dereference: false, force: true, errorOnExist: false });
+    } else {
+      backup = `${skillFile}.bak-${Date.now()}`; // mesmo padrão de backup da CLI install-skills
+      fs.copyFileSync(skillFile, backup);
+    }
   }
   fs.mkdirSync(skillDir, { recursive: true });
-  fs.writeFileSync(skillFile, content.endsWith('\n') ? content : `${content}\n`);
+  if (sourceDir) {
+    for (const f of listFilesInDir(sourceDir)) {
+      if (f.type !== 'file') continue;
+      const dest = path.join(skillDir, f.rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(path.join(sourceDir, f.rel), dest);
+    }
+  } else {
+    fs.writeFileSync(skillFile, content.endsWith('\n') ? content : `${content}\n`);
+  }
   return { ok: true, path: skillFile, action: backup ? 'updated' : 'created', backup, source };
 }
 
 /** Resolve um caminho existente e garante que está sob o home. */
-function assertUnderHome(dir, home) {
+export function assertUnderHome(dir, home = resolveHome()) {
   const real = fs.realpathSync.native(path.resolve(expandTilde(dir))); // lança se não existir
   const realHome = fs.realpathSync.native(home);
   if (real !== realHome && !real.startsWith(realHome + path.sep)) throw new Error('caminho fora do diretório home');
@@ -837,7 +863,7 @@ function fileKindFor(rel) {
 }
 
 /** Árvore de arquivos de um diretório de skill (SKILL.md primeiro). */
-function listFilesInDir(rootDir) {
+export function listFilesInDir(rootDir) {
   const files = [];
   const visited = new Set();
 

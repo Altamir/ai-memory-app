@@ -105,6 +105,9 @@ test.before(async () => {
       AIM_APP_IMPORT_FILE: fx.stateFile,
       AIM_APP_EXPORT_DIR: fx.exportsDir,
       AIM_STORE_DIR: fx.storeDir,
+      // perfil de servidor isolado: sem isto, um .servers.json no root do repo
+      // (com o perfil ativo gravado) sobrepõe o data-dir deste fixture
+      AIM_APP_SERVERS_FILE: path.join(fx.tmp, 'servers.json'),
       AI_MEMORY_DATA_DIR: fx.dataDir,
       AI_MEMORY_BIN: '/bin/echo', // fallback da CLI não toca em store nenhum
       AI_MEMORY_SERVER_URL: 'http://127.0.0.1:1',

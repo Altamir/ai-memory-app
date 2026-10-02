@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { tryTool } from './mcp.mjs';
 import { runCliJson, stderrMessage } from './cli.mjs';
 import { config } from './config.mjs';
+import { isEnvServerActive } from './servers.mjs';
 
 // Leituras (recent / read-page / search) via MCP HTTP, com fallback para a CLI.
 // scope = { workspace, project } restringe a um projeto; null = busca global.
@@ -69,6 +70,16 @@ export async function recentPages(limit = 20, scope = null) {
 }
 
 async function cliRecent(max, scope, errorNote) {
+  // o store em disco é o volume do servidor LOCAL: só vale listar quando o
+  // servidor ativo é este. Com o painel apontado para outro ai-memory, essas
+  // páginas seriam de outro lugar e apareceriam como se fossem do destino.
+  if (!isEnvServerActive()) {
+    return {
+      source: 'none',
+      note: `${errorNote ? `${errorNote}; ` : ''}o painel está conectado em ${config.serverUrl} — o store local (${config.storeDir}) não vale para esta leitura`,
+      items: [],
+    };
+  }
   // último recurso: cataloga os .md do wiki no volume do servidor (leitura direta)
   try {
     const { readdir } = await import('node:fs/promises');

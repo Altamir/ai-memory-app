@@ -2,6 +2,23 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
+// ---------- log de erros do frontend ----------
+
+// Erros de render morriam no catch de quem chamava e o único sintoma era um
+// pedaço de tela faltando. Agora cada erro vai para o console com prefixo
+// [aim] e fica num buffer consultável: window.__aimLogs (últimos 50).
+const __aimLogs = [];
+function aimLog(kind, detail) {
+  const entry = { at: new Date().toISOString(), kind, detail: String(detail?.message || detail).slice(0, 500) };
+  __aimLogs.push(entry);
+  if (__aimLogs.length > 50) __aimLogs.shift();
+  console.error(`[aim] ${kind}:`, detail);
+}
+window.addEventListener('error', (e) => aimLog('erro', e.message));
+window.addEventListener('unhandledrejection', (e) => aimLog('promise rejeitada', e.reason));
+window.__aimLogs = __aimLogs;
+window.__aimLog = aimLog;
+
 // ---------- helpers ----------
 
 function el(tag, attrs = {}, ...children) {
@@ -97,17 +114,25 @@ function modal({ title, bodyNode, actions = [], onClose, wide }) {
 
 /** Modal de confirmação que exige digitar uma palavra. */
 function confirmModal({ title, message, word, danger, onConfirm }) {
-  const input = el('input', { class: 'field', placeholder: `digite "${word}" para confirmar`, autocomplete: 'off' });
-  const confirmBtn = el('button', { class: `btn btn-${danger ? 'danger' : 'primary'}`, text: 'Confirmar', disabled: true });
-  input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim() !== word; });
+  // sem `word`, é só um sim/não: o input de confirmação não aparece (digitar
+  // uma palavra quando não há palavra a digitar deixa o botão travado)
+  const body = el('div', { class: 'stack' }, el('div', { class: 'small', text: message }));
+  let confirmBtn;
+  if (word) {
+    const input = el('input', { class: 'field', placeholder: `digite "${word}" para confirmar`, autocomplete: 'off' });
+    confirmBtn = el('button', { class: `btn btn-${danger ? 'danger' : 'primary'}`, text: 'Confirmar', disabled: true });
+    input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim() !== word; });
+    body.append(input);
+    setTimeout(() => input.focus(), 50);
+  } else {
+    confirmBtn = el('button', { class: `btn btn-${danger ? 'danger' : 'primary'}`, text: 'Confirmar' });
+  }
   confirmBtn.addEventListener('click', () => { close(); onConfirm(); });
-  const body = el('div', { class: 'stack' }, el('div', { class: 'small', text: message }), input);
   const close = modal({
     title,
     bodyNode: body,
     actions: [confirmBtn],
   });
-  setTimeout(() => input.focus(), 50);
 }
 
 function fmtBytes(n) {
@@ -164,7 +189,8 @@ const TITLES = {
   memories: 'Memórias',
   import: 'Importar memórias',
   export: 'Exportar bundle',
-  skills: 'Skills dos harnesses',
+  skills: 'Skills · harnesses e coleção',
+  logs: 'Logs do ai-memory',
 };
 
 const VIEWS = {};
@@ -192,20 +218,781 @@ for (const item of document.querySelectorAll('.menu-item')) {
 }
 window.addEventListener('hashchange', route);
 
-// ---------- chip de status no header ----------
+// ---------- chip de status + troca de servidor no header ----------
+
+let ACTIVE_SERVER = null; // { id, name, url, hasToken } do perfil conectado
+let SETUP = null;         // diagnóstico de arranque (servidor + CLI)
 
 async function refreshServerChip() {
   const chip = $('#server-chip');
+  let text = 'servidor offline';
+  let kind = 'chip-err';
+
+  // o diagnóstico vem primeiro: é ele que diz se falta servidor ou falta CLI,
+  // e o /api/status (que roda a CLI) falha justamente quando ela não existe
+  try {
+    SETUP = await api('/api/setup');
+  } catch {
+    SETUP = null;
+  }
+
   try {
     const s = await api('/api/status');
-    chip.className = 'chip chip-ok';
-    chip.textContent = `servidor ok · v${s.version || '?'}`;
+    const srv = await api('/api/servers').catch(() => null);
+    ACTIVE_SERVER = srv?.active || null;
+    const name = ACTIVE_SERVER?.name || 'servidor';
+    const ver = s.version ? ` · v${s.version}` : '';
+    text = `${name}${ver}`;
+    kind = ACTIVE_SERVER?.hasToken === false ? 'chip-warn' : 'chip-ok';
   } catch {
-    chip.className = 'chip chip-err';
-    chip.textContent = 'servidor offline';
+    // sem CLI o status não roda: o texto tem que dizer o que falta, senão
+    // "servidor offline" aponta para o problema errado
+    if (SETUP && !SETUP.cli.ok) {
+      text = 'falta a CLI do ai-memory';
+      kind = 'chip-warn';
+    } else if (SETUP && !SETUP.server.ok) {
+      text = 'servidor não responde';
+      kind = 'chip-err';
+    } else if (ACTIVE_SERVER) {
+      text = `${ACTIVE_SERVER.name} · offline`;
+    }
   }
+  chip.className = `chip chip-btn ${kind}`;
+  chip.textContent = text;
+  // ativo e fora da lista: o chip precisa dizer, senão parece um servidor comum
+  const hiddenNote = ACTIVE_SERVER?.hidden ? ' (removido da lista)' : '';
+  chip.title = ACTIVE_SERVER
+    ? `Conectado: ${ACTIVE_SERVER.name} (${ACTIVE_SERVER.url})${hiddenNote}\nClique para trocar de servidor`
+    : 'Conectando ao servidor ai-memory…';
 }
+$('#server-chip').addEventListener('click', () => {
+  // com algo faltando, o clique vai direto para o que precisa ser resolvido
+  if (SETUP && SETUP.actions.length) return openSetupWizard();
+  openServerManager();
+});
 setInterval(refreshServerChip, 60_000);
+
+// ---------- primeiro uso: o que falta para o painel funcionar ----------
+
+/**
+ * Fluxo de primeiro uso, em passos — a ordem é a do que o usuário precisa fazer:
+ *
+ *   1. CLI do ai-memory      (oferece instalar, ou usar a que já existe no PATH)
+ *   2. Servidor local ou remoto (pergunta, pré-preenche a URL do local)
+ *   3. URL + token           (testa a conexão e salva)
+ *
+ * Cada passo é renderizado de novo (`render(step)`) porque o modal não é
+ * navegável; ao terminar, o chip e a tela atual se refrescam.
+ */
+async function openSetupWizard(step = 'auto') {
+  const setup = SETUP || await api('/api/setup').catch(() => null);
+  if (!setup) {
+    toast('não consegui ler o diagnóstico', 'err');
+    return;
+  }
+
+  // um wizard por vez: navegar entre passos fecha o modal anterior
+  $('#modal-root').replaceChildren();
+
+  // passo automático: pula o que já está resolvido
+  if (step === 'auto') {
+    step = !setup.cli.ok ? 'cli' : !setup.server.ok ? 'server' : 'done';
+  }
+
+  // ---- passo 1: CLI ----
+  if (step === 'cli') return renderStepCli(setup);
+  // ---- passos 2 e 3: servidor ----
+  if (step === 'server') return renderStepServer(setup);
+  return renderStepDone(setup);
+}
+
+/** Passo 1 — instalar (ou reapontar) a CLI. */
+async function renderStepCli(setup) {
+  const card = el('div', { class: 'card stack', style: 'gap:8px' });
+  const releaseOut = el('div', { class: 'small muted' });
+  const installOut = el('div', { class: 'small muted' });
+  const installBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Instalar a CLI' });
+  let release = null;
+
+  const showRelease = async () => {
+    releaseOut.textContent = 'consultando a release oficial…';
+    release = await api('/api/setup/cli-release').catch(() => null);
+    if (!release?.ok) {
+      releaseOut.textContent = `não consegui consultar a release: ${release?.error || 'erro'}`;
+      installBtn.disabled = true;
+      return;
+    }
+    releaseOut.textContent = `${release.name || release.tag} · ${release.asset?.name || 'sem binário para esta máquina'}`;
+  };
+
+  installBtn.addEventListener('click', async () => {
+    // instalar escreve em disco e baixa de fora: só com confirmação explícita
+    confirmModal({
+      title: 'Instalar a CLI do ai-memory?',
+      message: `Vai baixar ${release?.asset?.name || 'o binário'} da release oficial (${release?.url || 'github'}) para ${setup.cli.configuredPath}, conferindo o checksum SHA256 antes de extrair. Se já houver uma CLI no caminho, ela é guardada como .bak-<data>.`,
+      onConfirm: async () => {
+        installBtn.disabled = true;
+        installOut.textContent = 'instalando…';
+        // container próprio para o log do job: mensagens de status vão em
+        // installOut — e textContent apaga os filhos, então o log NÃO pode
+        // morar dentro dele
+        const jobPanel = el('div', { class: 'stack', style: 'margin-top:4px' });
+        card.querySelectorAll('[data-job-panel]').forEach((n) => n.remove());
+        jobPanel.dataset.jobPanel = 'true';
+        card.append(jobPanel);
+        try {
+          const job = await api('/api/setup/install-cli', { method: 'POST', body: { confirm: true } });
+          await showJob(job.id, jobPanel, null, {});
+          const t = setInterval(async () => {
+            const j = await api(`/api/jobs/${job.id}`).catch((err) => { console.error('[aim-setup] job desapareceu:', err); return null; });
+            if (!j || j.status === 'running') return;
+            clearInterval(t);
+            await refreshServerChip();
+            if (j.status === 'ok') {
+              toast('CLI instalada', 'ok');
+              // segue a docs: depois de instalar, `ai-memory init` cria o
+              // layout do data-dir (passo 1 do setup oficial)
+              try {
+                await api('/api/setup/init', { method: 'POST' });
+              } catch (err) {
+                aimLog('install-cli: init pós-instalação falhou', err);
+              }
+              openSetupWizard('server'); // segue para o servidor
+            } else {
+              // o porquê está no log do job acima (download, checksum, extração)
+              __aimLogs.push({ at: new Date().toISOString(), kind: 'install-cli', detail: `job ${job.id} terminou ${j.status}` });
+              installOut.textContent = `a instalação falhou (código ${j.exitCode ?? '?'}) — o motivo está no log acima`;
+              installBtn.disabled = false;
+            }
+          }, 1500);
+        } catch (err) {
+          aimLog('install-cli: não consegui criar o job', err);
+          installOut.textContent = err.message;
+          installBtn.disabled = false;
+        }
+      },
+    });
+  });
+
+  // CLI achada no PATH, mas o perfil aponta para onde ela não está: oferecer
+  // realinhar sem instalar nada
+  const elsewhereRow = () => {
+    if (!setup.cli.foundElsewhere) return null;
+    const btn = el('button', { class: 'btn btn-secondary btn-sm', text: 'usar este caminho' });
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await api('/api/setup/use-cli', { method: 'POST', body: { path: setup.cli.foundElsewhere } });
+        toast('caminho da CLI atualizado', 'ok');
+        await refreshServerChip();
+        openSetupWizard('server');
+      } catch (err) {
+        aimLog('install-cli: usar-caminho-alternativo falhou', err);
+        toast(err.message, 'err');
+        btn.disabled = false;
+      }
+    });
+    return el('div', { class: 'row', style: 'gap:6px; align-items:center' },
+      el('span', { class: 'small muted', text: `há uma CLI em ${setup.cli.foundElsewhere}${setup.cli.foundElsewhereVersion ? ` · v${setup.cli.foundElsewhereVersion}` : ''}` }),
+      btn,
+    );
+  };
+
+  replaceKids(card,
+      el('div', { class: 'row-between' },
+        el('strong', { text: 'CLI do ai-memory' }),
+        el('span', { class: 'chip chip-warn', text: 'não instalada' }),
+      ),
+      el('div', { class: 'small muted', text: `O painel procura a CLI em ${setup.cli.configuredPath}, que não existe.` }),
+      el('div', { class: 'row', style: 'gap:6px' }, installBtn),
+      releaseOut,
+      installOut,
+      elsewhereRow(),
+  );
+
+  const body = el('div', { class: 'stack' },
+    el('div', { class: 'small muted', text: 'Passo 1 de 2 — a CLI do ai-memory. Sem ela, manutenção e sessões run não funcionam; a leitura de memórias pelo servidor não é afetada.' }),
+    card,
+    el('div', { class: 'row', style: 'justify-content:flex-end' },
+      el('button', { class: 'btn btn-secondary btn-sm', text: 'configurar servidor primeiro', onclick: () => openSetupWizard('server') }),
+    ),
+  );
+
+  const close = modal({ title: 'Preparar o painel', wide: true, bodyNode: body, actions: [{ label: 'Fechar' }] });
+  showRelease();
+  return close;
+}
+
+/** Passos 2 e 3 — local ou remoto, depois URL + token. */
+async function renderStepServer(setup) {
+  const card = el('div', { class: 'card stack', style: 'gap:8px' });
+  const nameIn = el('input', { class: 'field', placeholder: 'meu ai-memory', autocomplete: 'off' });
+  const urlIn = el('input', { class: 'field mono', placeholder: 'http://127.0.0.1:49374', autocomplete: 'off' });
+  const tokenIn = el('input', { class: 'field', type: 'password', placeholder: 'token do servidor (Bearer)', autocomplete: 'off' });
+  const probeOut = el('div', { class: 'small muted' });
+  const LOCAL_URL = 'http://127.0.0.1:49374';
+
+  // ---- pergunta: local ou remoto? ----
+  let kind = 'remote';
+  const kindRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px' });
+  const radio = (value, label, hint) => {
+    const rb = el('input', { type: 'radio', name: 'setup-kind' });
+    rb.addEventListener('change', () => {
+      if (!rb.checked) return;
+      kind = value;
+      urlIn.value = value === 'local' ? LOCAL_URL : '';
+      tokenIn.value = '';
+      hintEl.textContent = value === 'local'
+        ? 'Um ai-memory nesta máquina (Docker ou `ai-memory serve`). A URL padrão já vem preenchida; o token é o do auth-token local, se houver.'
+        : 'Um ai-memory em outra máquina. Precisa da URL exposta e do token (Bearer) dela.';
+      urlIn.focus();
+    });
+    if (value === kind) rb.checked = true;
+    return el('label', { class: 'check', style: 'flex-direction:column; align-items:flex-start; gap:2px' },
+      el('span', { class: 'row', style: 'gap:6px; align-items:center' }, rb, el('strong', { text: label })),
+      el('span', { class: 'small muted', text: hint }),
+    );
+  };
+  const hintEl = el('div', { class: 'small muted', text: 'Um ai-memory em outra máquina. Precisa da URL exposta e do token (Bearer) dela.' });
+  kindRow.append(
+    radio('local', 'Servidor local', 'nesta máquina (Docker ou `ai-memory serve`)'),
+    radio('remote', 'Servidor remoto', 'em outra máquina, com URL + token'),
+  );
+
+  const probeBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Testar conexão' });
+  probeBtn.addEventListener('click', async () => {
+    if (!urlIn.value.trim()) return toast('informe a URL', 'err');
+    probeBtn.disabled = true;
+    probeOut.textContent = 'testando…';
+    try {
+      const res = await api('/api/servers/probe', {
+        method: 'POST',
+        body: { url: urlIn.value.trim(), token: tokenIn.value.trim() },
+      });
+      probeOut.textContent = res.ok
+        ? `respondeu${res.version ? ` · v${res.version}` : ''}${res.hasToken ? ' · com token' : ' · sem token'}${res.totals?.pages_latest !== undefined ? ` · ${res.totals.pages_latest} página(s) no servidor` : ''}`
+        : `não respondeu: ${res.error}`;
+    } catch (err) {
+      probeOut.textContent = err.message;
+    } finally {
+      probeBtn.disabled = false;
+    }
+  });
+
+  const saveBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Salvar e conectar' });
+  saveBtn.addEventListener('click', async () => {
+    if (!urlIn.value.trim()) return toast('informe a URL do servidor', 'err');
+    saveBtn.disabled = true;
+    try {
+      const saved = await api('/api/servers', {
+        method: 'POST',
+        body: {
+          name: nameIn.value.trim() || (kind === 'local' ? 'ai-memory local' : 'ai-memory remoto'),
+          url: urlIn.value.trim(),
+          token: tokenIn.value.trim() || null,
+        },
+      });
+      const target = saved.servers.find((s) => !s.env && s.url === urlIn.value.trim().replace(/\/+$/, ''));
+      if (target) await api('/api/servers/activate', { method: 'POST', body: { id: target.id } });
+      toast('servidor salvo e conectado', 'ok');
+      await refreshServerChip();
+      openSetupWizard('done');
+    } catch (err) {
+      aimLog('setup-server: salvar/conectar falhou', err);
+      toast(err.message, 'err');
+      saveBtn.disabled = false;
+    }
+  });
+
+  replaceKids(card,
+    el('div', { class: 'row-between' },
+      el('strong', { text: 'Servidor do ai-memory' }),
+      el('span', { class: 'chip chip-err', text: 'não configurado' }),
+    ),
+    el('div', { class: 'small muted', text: 'O painel precisa de um servidor para ler e escrever memórias. Onde ele está?' }),
+    kindRow,
+    hintEl,
+    el('label', { class: 'field-label' }, 'Nome (opcional)', nameIn),
+    el('label', { class: 'field-label' }, 'URL', urlIn),
+    el('label', { class: 'field-label' }, 'Token', tokenIn),
+    el('div', { class: 'row', style: 'gap:6px' }, probeBtn, saveBtn),
+    probeOut,
+  );
+
+  const body = el('div', { class: 'stack' },
+    el('div', { class: 'small muted', text: setup.cli.ok
+      ? 'Passo 2 de 2 — a CLI está instalada, falta apontar o servidor.'
+      : 'Configuração do servidor (a CLI ainda não está instalada — dá para voltar nela depois pelo chip.' }),
+    card,
+    setup.cli.ok ? null : el('div', { class: 'row', style: 'justify-content:flex-end' },
+      el('button', { class: 'btn btn-secondary btn-sm', text: 'voltar para a CLI', onclick: () => openSetupWizard('cli') }),
+    ),
+  );
+
+  return modal({ title: 'Preparar o painel', wide: true, bodyNode: body, actions: [{ label: 'Fechar' }] });
+}
+
+/** Fim — tudo resolvido. */
+async function renderStepDone(setup) {
+  let closeFn = null;
+  const body = el('div', { class: 'stack' },
+    el('div', { class: 'card stack', style: 'gap:6px' },
+      el('strong', { text: 'Tudo pronto' }),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'CLI' }),
+        el('span', { class: 'mono', text: setup.cli.ok
+          ? `${setup.cli.path}${setup.cli.version ? ` · v${setup.cli.version}` : ''}`
+          : 'não instalada — oferecida de novo no próximo boot, ou pelo chip' }),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'Servidor' }),
+        el('span', { class: 'mono', text: `${setup.server.name} · ${setup.server.url}` }),
+      ),
+      el('div', { class: 'small muted', text: 'Para trocar de servidor depois, use o chip no topo. Para apontar o MCP dos harnesses para este servidor, o gestor de servidores tem a seção "MCP dos harnesses".' }),
+    ),
+    el('div', { class: 'row', style: 'justify-content:flex-end' },
+      el('button', { class: 'btn btn-secondary btn-sm', text: 'abrir gestão de servidores', onclick: () => { closeFn?.(); openServerManager(); } }),
+    ),
+  );
+  // formato objeto do modal(): sem onClick, o botão fecha sozinho — nós crus
+  // entram SEM handler (era o "Começar a usar não faz nada")
+  const ret = modal({
+    title: 'Preparar o painel',
+    wide: true,
+    bodyNode: body,
+    actions: [{
+      label: 'Começar a usar',
+      kind: 'primary',
+      onClick: (close) => {
+        close();
+        refreshServerChip();
+        route(); // o dashboard atrás pode estar no cartão "Falta preparar"
+      },
+    }],
+  });
+  closeFn = ret;
+  return ret;
+}
+
+/**
+ * Libera o modal substituindo o conteúdo: `replaceChildren` não filtra null, e
+ * um `cond ? el(...) : null` solto vira a palavra "null" na tela.
+ */
+function replaceKids(node, ...kids) {
+  node.replaceChildren(...kids.flat().filter(Boolean));
+}
+
+// ---------- modal: servidores do ai-memory ----------
+
+/**
+ * Troca o ai-memory que o painel inteiro usa (leituras, manutenção, run,
+ * exportação e importação). Cada perfil carrega URL + data-dir do cliente, e
+ * o token vem do <data-dir>/auth-token daquele servidor — o mesmo lugar de onde
+ * a CLI já lê. A URL e o data-dir seguem o servidor; o binário é opcional e
+ * cai no do ambiente quando o servidor remoto usa o mesmo executável local.
+ */
+async function openServerManager() {
+  let data;
+  try {
+    data = await api('/api/servers');
+  } catch (err) {
+    toast(`não consegui ler os servidores: ${err.message}`, 'err');
+    return;
+  }
+
+  const body = el('div', { class: 'stack' });
+  const form = {
+    id: null,
+    name: '',
+    url: '',
+    dataDir: '',
+    bin: '',
+    token: '',
+    clearToken: false,
+  };
+
+  const listBox = el('div', { class: 'stack' });
+  const formBox = el('div', { class: 'card stack', style: 'gap:8px' });
+
+  function renderList() {
+    const doRemove = async (s) => {
+      try {
+        data = await api(`/api/servers/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+        toast('servidor removido', 'ok');
+        renderList();
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    };
+
+    const rows = data.servers.map((s) => {
+      const isActive = s.id === data.active.id;
+      const remove = async () => {
+        // o ambiente é diferente: ele é o destino implícito do painel. Avisar
+        // que pode ser o último destino evita a surpresa de sumir com ele.
+        if (s.env) {
+          const last = data.servers.length === 1;
+          confirmModal({
+            title: 'Remover o servidor do ambiente?',
+            message: last
+              ? `É o único servidor da lista. Removendo, o painel continua funcionando e o ambiente (${s.url}) segue como destino — ele só some da lista, sem botão para voltar. Para recuperá-lo, apague o .servers.json do painel.`
+              : `Ele sai da lista, mas o painel continua funcionando: o ambiente (${s.url}) segue como destino implícito e pode voltar pelo botão "mostrar na lista".`,
+            danger: true,
+            onConfirm: () => doRemove(s),
+          });
+          return;
+        }
+        await doRemove(s);
+      };
+      return el('div', { class: 'card row-between', style: 'gap:8px; padding:10px 12px' },
+        el('div', { class: 'stack', style: 'gap:2px; min-width:0' },
+          el('div', { class: 'row', style: 'gap:6px; align-items:center' },
+            el('strong', { text: s.name }),
+            isActive ? el('span', { class: 'chip chip-ok', text: 'ativo' }) : null,
+            s.env ? el('span', { class: 'chip', text: 'ambiente' }) : null,
+            !s.hasToken ? el('span', { class: 'chip chip-warn', text: 'sem token' }) : null,
+          ),
+          el('span', { class: 'small muted mono', text: s.url }),
+          el('span', { class: 'small muted mono', text: `data-dir: ${s.dataDir}` }),
+        ),
+        el('div', { class: 'row', style: 'gap:6px' },
+          isActive
+            ? el('span', { class: 'small muted', text: 'conectado' })
+            : el('button', {
+                class: 'btn btn-primary btn-sm',
+                text: 'conectar',
+                onclick: async () => {
+                  try {
+                    data = await api('/api/servers/activate', { method: 'POST', body: { id: s.id } });
+                    toast(`conectado em ${s.name}`, 'ok');
+                    close();
+                    refreshServerChip();
+                    route();
+                  } catch (err) {
+                    toast(err.message, 'err');
+                  }
+                },
+              }),
+          s.env ? null : el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: 'editar',
+            onclick: () => fillForm(s),
+          }),
+          el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: 'remover',
+            title: s.env
+              ? 'Some da lista; o ambiente continua como destino implícito do painel'
+              : 'Remove este servidor do painel',
+            onclick: remove,
+          }),
+        ),
+      );
+    });
+
+    // o ambiente removido some da lista: sem isso não haveria como trazê-lo de volta
+    const hiddenEnv = data.active.hidden;
+    const isEnvActive = data.active.id === 'local';
+    if (hiddenEnv) {
+      rows.push(el('div', { class: 'card row-between', style: 'gap:8px; padding:10px 12px' },
+        el('div', { class: 'stack', style: 'gap:2px; min-width:0' },
+          el('div', { class: 'row', style: 'gap:6px; align-items:center' },
+            el('strong', { text: data.active.name, style: 'opacity:.7' }),
+            el('span', { class: 'chip', text: 'removido da lista' }),
+            isEnvActive ? el('span', { class: 'chip chip-ok', text: 'ativo' }) : null,
+          ),
+          el('span', { class: 'small muted mono', text: data.active.url }),
+          el('span', { class: 'small muted', text: 'O painel continua conectado aqui: é o destino implícito das variáveis de ambiente.' }),
+        ),
+        el('button', {
+          class: 'btn btn-secondary btn-sm',
+          text: 'mostrar na lista',
+          onclick: async () => {
+            try {
+              data = await api('/api/servers/env', { method: 'POST' });
+              toast('servidor do ambiente restaurado', 'ok');
+              renderList();
+            } catch (err) {
+              toast(err.message, 'err');
+            }
+          },
+        }),
+      ));
+    }
+    listBox.replaceChildren(...rows);
+  }
+
+  function fillForm(s) {
+    form.id = s.id;
+    form.name = s.name;
+    form.url = s.url;
+    form.dataDir = s.dataDir;
+    form.bin = s.bin;
+    form.token = '';
+    form.clearToken = false;
+    form.hasToken = s.hasToken;
+    clearTokenCheck.checked = false;
+    nameInput.value = s.name;
+    urlInput.value = s.url;
+    dataDirInput.value = s.dataDir;
+    binInput.value = s.bin === data.active.bin ? '' : s.bin;
+    tokenInput.value = '';
+    tokenInput.placeholder = s.hasToken
+      ? 'deixe em branco para manter o token gravado'
+      : 'token (opcional — senão usa o data-dir)';
+    title.textContent = 'Editar servidor';
+    saveBtn.textContent = 'Salvar';
+    renderForm();
+  }
+
+  function clearForm() {
+    form.id = null;
+    form.clearToken = false;
+    nameInput.value = '';
+    urlInput.value = '';
+    dataDirInput.value = '';
+    binInput.value = '';
+    tokenInput.value = '';
+    tokenInput.placeholder = 'token (opcional — senão usa o data-dir)';
+    title.textContent = 'Adicionar servidor';
+    saveBtn.textContent = 'Adicionar';
+    renderForm();
+  }
+
+  const title = el('strong', { text: 'Adicionar servidor' });
+  const nameInput = el('input', { class: 'field', placeholder: 'VPS de produção' });
+  const urlInput = el('input', { class: 'field mono', placeholder: 'http://10.0.0.5:49374', autocomplete: 'off' });
+  const dataDirInput = el('input', { class: 'field mono', placeholder: '~/.ai-memory-data-cliente', autocomplete: 'off' });
+  const binInput = el('input', { class: 'field mono', placeholder: 'binário do ai-memory (opcional)', autocomplete: 'off' });
+  const tokenInput = el('input', { class: 'field', type: 'password', placeholder: 'token (opcional — senão usa o data-dir)', autocomplete: 'off' });
+  const clearTokenCheck = el('input', { type: 'checkbox' });
+  clearTokenCheck.addEventListener('change', () => { form.clearToken = clearTokenCheck.checked; });
+  const clearTokenLabel = el('label', { class: 'check', style: 'gap:4px' }, clearTokenCheck, 'limpar token gravado');
+  const probeOut = el('div', { class: 'small muted' });
+
+  const saveBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Adicionar' });
+  const probeBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Testar conexão' });
+  const resetBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Limpar' });
+
+  function renderForm() {
+    saveBtn.textContent = form.id ? 'Salvar' : 'Adicionar';
+    formBox.replaceChildren(
+      title,
+      el('label', { class: 'field-label' }, 'Nome', nameInput),
+      el('label', { class: 'field-label' }, 'URL do servidor', urlInput),
+      el('label', { class: 'field-label' }, 'Data-dir do cliente (dai o token)', dataDirInput),
+      el('label', { class: 'field-label' }, 'Binário da CLI', binInput),
+      el('label', { class: 'field-label' }, 'Token', tokenInput),
+      form.id && form.hasToken ? clearTokenLabel : null,
+      el('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' }, saveBtn, probeBtn, resetBtn),
+      probeOut,
+    );
+  }
+
+  const collect = () => {
+    const t = tokenInput.value.trim();
+    return {
+      id: form.id || undefined,
+      name: nameInput.value.trim(),
+      url: urlInput.value.trim(),
+      dataDir: dataDirInput.value.trim(),
+      bin: binInput.value.trim(),
+      // edição: em branco = manter o gravado (chave omitida); "limpar token"
+      // marcado = '' explícito. Criação: valor ou null.
+      ...(form.id
+        ? (form.clearToken ? { token: '' } : (t ? { token: t } : {}))
+        : { token: t || null }),
+    };
+  };
+
+  saveBtn.addEventListener('click', async () => {
+    const payload = collect();
+    if (!payload.url) return toast('informe a URL do servidor', 'err');
+    try {
+      const out = await api('/api/servers', { method: 'POST', body: payload });
+      data = out;
+      toast('servidor salvo', 'ok');
+      clearForm();
+      renderList();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  });
+
+  probeBtn.addEventListener('click', async () => {
+    const payload = collect();
+    if (!payload.url) return toast('informe a URL do servidor', 'err');
+    probeOut.textContent = 'testando…';
+    const res = await api('/api/servers/probe', { method: 'POST', body: payload });
+    // servidor no ar mas sem página alguma quase sempre é store não restaurado
+    // (o `up.sh` da migração só sobe o container; o store entra depois)
+    const empty = res.ok && res.totals && !res.totals.pages_latest;
+    probeOut.textContent = res.ok
+      ? `respondeu${res.version ? ` · v${res.version}` : ''}${res.hasToken ? ' · com token' : ' · sem token'}`
+        + (res.totals?.pages_latest !== undefined ? ` · ${res.totals.pages_latest} página(s) no servidor` : '')
+        + (empty ? ' — responde, mas está vazio: falta restaurar o store (bundle de backup) nesse servidor' : '')
+        + (res.versionNote ? ` · ${res.versionNote}` : '')
+      : `não respondeu: ${res.error}`;
+  });
+
+  resetBtn.addEventListener('click', clearForm);
+
+  const cancelBtn = el('button', { class: 'btn btn-secondary', text: 'Fechar' });
+  const harnessBox = el('div', { class: 'stack', id: 'harness-mcp-box' });
+  const close = modal({
+    title: 'Servidores do ai-memory',
+    wide: true,
+    bodyNode: el('div', { class: 'stack' },
+      el('div', { class: 'small muted' },
+        'O painel inteiro passa a falar com o servidor escolhido: dashboard, memórias, manutenção, sessões run e importação. O token vem do ',
+        el('code', { text: 'auth-token' }),
+        ' do data-dir informado; um token digitado no formulário é opcional e fica gravado em ',
+        el('code', { text: '.servers.json' }),
+        ' (modo 0600, fora do git).'),
+      listBox,
+      formBox,
+      harnessBox,
+    ),
+    actions: [cancelBtn],
+  });
+  cancelBtn.addEventListener('click', close);
+
+  renderList();
+  renderForm();
+  renderHarnesses(harnessBox);
+  return { close };
+}
+
+/**
+ * MCP dos harnesses: reescreve a entrada do ai-memory nas configs das
+ * ferramentas para apontarem ao servidor conectado. A escrita é do próprio
+ * `ai-memory install-mcp --apply` (a CLI conhece o formato de cada cliente,
+ * preserva os outros servidores e faz backup) — o painel só escolhe quais.
+ */
+async function renderHarnesses(box) {
+  const selected = new Set();
+  const statusLine = el('div', { class: 'small muted' });
+  const listBox = el('div', { class: 'stack', style: 'gap:6px' });
+
+  const applyBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Aplicar selecionados', disabled: true });
+  applyBtn.addEventListener('click', async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    applyBtn.disabled = true;
+    statusLine.textContent = `aplicando em ${ids.length} harness(es)…`;
+    try {
+      const out = await api('/api/harness-mcp/apply', { method: 'POST', body: { harnesses: ids } });
+      const ok = out.results.filter((r) => r.ok).length;
+      const bad = out.results.filter((r) => !r.ok);
+      for (const b of bad) toast(`${b.id || b.label || 'harness'}: ${b.error}`, 'err');
+      toast(bad.length ? `${ok} aplicado(s), ${bad.length} com erro` : `MCP atualizado em ${ok} harness(es)`, bad.length ? 'err' : 'ok');
+      // recarrega a lista para refletir o que foi mudado, sem re-renderizar tudo
+      applyBtn.disabled = true;
+      statusLine.textContent = 'atualizando a lista…';
+      await loadHarnessRows();
+      applyBtn.disabled = selected.size === 0;
+    } catch (err) {
+      toast(err.message, 'err');
+      statusLine.textContent = `falhou: ${err.message}`;
+      applyBtn.disabled = false;
+    }
+  });
+
+  // (re)carrega só as linhas: na abertura e depois de aplicar, sem recriar o
+  // botão nem perder a seleção
+  async function loadHarnessRows() {
+    let data;
+    try {
+      data = await api('/api/harness-mcp');
+    } catch (err) {
+      listBox.replaceChildren(el('div', { class: 'small', style: 'color:var(--danger)', text: err.message }));
+      return;
+    }
+    const rows = data.harnesses.map((h) => {
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = selected.has(h.id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(h.id);
+        else selected.delete(h.id);
+        applyBtn.disabled = selected.size === 0;
+      });
+      const state = !h.registered
+        ? (h.configExists ? el('span', { class: 'chip', text: 'não instalado' }) : el('span', { class: 'chip', text: 'sem config' }))
+        : h.aligned
+          ? el('span', { class: 'chip chip-ok', text: 'em dia' })
+          : el('span', { class: 'chip chip-warn', text: 'aponta p/ outro' });
+
+      // hooks: o que captura o trabalho e vincula o projeto no primeiro capture
+      let hooksBtn = null;
+      if (h.hooksSupported) {
+        hooksBtn = el('button', {
+          class: 'btn btn-secondary btn-sm',
+          text: 'hooks',
+          title: `install-hooks --agent ${h.id} --apply — captura prompts/ferramentas/sessões e vincula o projeto (idempotente, com backup)`,
+          onclick: async () => {
+            hooksBtn.disabled = true;
+            hooksBtn.textContent = '…';
+            try {
+              const job = await api('/api/harness-hooks/apply', { method: 'POST', body: { agents: [h.id] } });
+              // o job é assíncrono: um GET único quase sempre vê "running" e
+              // diria "falhou" com a instalação ainda rodando — poll até terminar
+              const fim = await new Promise((resolve) => {
+                const t = setInterval(async () => {
+                  const j = await api(`/api/jobs/${job.id}`).catch(() => null);
+                  if (!j || j.status === 'running') return;
+                  clearInterval(t);
+                  resolve(j);
+                }, 1000);
+              });
+              if (fim.status === 'ok') {
+                hooksBtn.textContent = 'hooks ✓';
+                toast(`hooks do ${h.label} instalados`, 'ok');
+              } else {
+                hooksBtn.textContent = 'hooks';
+                toast(`hooks do ${h.label} falharam — veja o histórico`, 'err');
+              }
+            } catch (err) {
+              aimLog('harness-hooks: aplicação falhou', err);
+              toast(err.message, 'err');
+              hooksBtn.textContent = 'hooks';
+            } finally {
+              hooksBtn.disabled = false;
+            }
+          },
+        });
+      }
+
+      return el('div', { class: 'card row-between', style: 'gap:8px; padding:8px 10px' },
+        el('label', { class: 'check row', style: 'gap:8px; align-items:center; min-width:0; cursor:pointer' },
+          cb,
+          el('strong', { text: h.label }),
+          state,
+        ),
+        el('div', { class: 'row', style: 'gap:6px; align-items:center' },
+          hooksBtn,
+          el('span', { class: 'small muted mono', style: 'font-size:11px; word-break:break-all', text: h.currentUrl || h.configFile || '—' }),
+        ),
+      );
+    });
+    listBox.replaceChildren(...rows);
+    const inSync = data.harnesses.filter((h) => h.aligned && h.registered).length;
+    const stale = data.harnesses.filter((h) => h.registered && !h.aligned).length;
+    statusLine.textContent = `${inSync} harness(es) em dia com ${data.serverUrl}`
+      + (stale ? ` · ${stale} apontando para outro servidor` : '');
+  }
+
+  box.replaceChildren(
+    el('div', { class: 'stack', style: 'gap:2px' },
+      el('strong', { text: 'MCP e hooks dos harnesses' }),
+      el('span', { class: 'small muted', text: 'MCP: reescreve a entrada do ai-memory nas configs das ferramentas para apontarem ao servidor conectado. Hooks: instala a captura de prompts/ferramentas/sessões — é o que vincula o projeto ao servidor no primeiro capture. O backup de cada arquivo é feito pela própria CLI, e os outros servidores que você tenha configurado são preservados. Depois de aplicar, reinicie a ferramenta para ela reler a config.' }),
+      statusLine,
+    ),
+    listBox,
+    el('div', { class: 'row', style: 'gap:6px' }, applyBtn),
+  );
+
+  await loadHarnessRows();
+}
 
 // ---------- view: dashboard ----------
 
@@ -214,6 +1001,30 @@ VIEWS.dashboard = async (main) => {
   main.append(wrap);
   const load = async () => {
     wrap.replaceChildren(el('div', { class: 'empty', text: 'carregando status…' }));
+
+    // sem servidor ou sem CLI, o dashboard não tem dado para mostrar: o cartão
+    // de preparação é a resposta certa, com o botão que reabre o wizard
+    const setup = SETUP || await api('/api/setup').catch(() => null);
+    if (setup && setup.actions.length) {
+      const faltas = [
+        ...(!setup.server.ok ? ['servidor do ai-memory não configurado/inalcançável'] : []),
+        ...(!setup.cli.ok ? [`CLI não instalada (${setup.cli.configuredPath})`] : []),
+      ];
+      wrap.replaceChildren(
+        el('div', { class: 'card stack', style: 'gap:8px' },
+          el('div', { class: 'row-between' },
+            el('strong', { text: 'Falta preparar o painel' }),
+            el('button', { class: 'btn btn-primary btn-sm', text: 'Preparar agora', onclick: () => openSetupWizard() }),
+          ),
+          el('ul', { class: 'small muted', style: 'margin:0; padding-left:18px' },
+            faltas.map((f) => el('li', { text: f })),
+          ),
+          el('div', { class: 'small muted', text: 'O assistente instala a CLI do ai-memory (se você quiser) e cadastra o servidor — local ou remoto — com URL e token.' }),
+        ),
+      );
+      return;
+    }
+
     let s;
     try {
       s = await api('/api/status');
@@ -225,7 +1036,7 @@ VIEWS.dashboard = async (main) => {
             el('button', { class: 'btn btn-secondary btn-sm', text: 'Tentar de novo', onclick: load }),
           ),
           el('p', { class: 'small muted', text: err.message }),
-          el('p', { class: 'small muted', text: `Verifique o container (docker ps) e a URL ${''}http://127.0.0.1:49374.` }),
+          el('p', { class: 'small muted', text: `Verifique o container (docker ps) e a URL ${ACTIVE_SERVER?.url || 'configurada no painel'}.` }),
         ),
       );
       return;
@@ -245,9 +1056,55 @@ VIEWS.dashboard = async (main) => {
         el('span', { class: 'mono', text: k.endsWith('_bytes') ? (fmtBytes(v) || v) : String(v) }),
       ));
 
+    // CLI e dados locais: onde está o binário e os dados do lado desta máquina.
+    // Vem do diagnóstico (GET /api/setup) já buscado no início do load — a
+    // mesma fonte do chip e do wizard.
+    const mark = (ok) => el('span', { class: `chip ${ok ? 'chip-ok' : 'chip-warn'}`, text: ok ? '✓' : '—' });
+    const cliRows = setup ? [
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'Binário' }),
+        setup.cli.ok
+          ? el('span', { class: 'mono', style: 'text-align:right; word-break:break-all', text: `${setup.cli.path}${setup.cli.version ? ` · v${setup.cli.version}` : ''}` })
+          : el('button', { class: 'chip chip-btn chip-warn', text: 'não instalada — preparar', onclick: () => openSetupWizard() }),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'Data-dir do cliente' }),
+        el('span', { class: 'mono', style: 'text-align:right; word-break:break-all', text: setup.paths.dataDir }),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'auth-token' }), mark(setup.paths.dataDirToken),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'client-projects.json' }), mark(setup.paths.dataDirProjects),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'config.toml' }), mark(setup.paths.dataDirConfig),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'Volume do store (export)' }),
+        el('span', { class: 'mono', style: 'text-align:right; word-break:break-all', text: setup.paths.storeDir }),
+      ),
+      el('div', { class: 'row-between small' },
+        el('span', { class: 'muted', text: 'wiki + db no volume' }),
+        el('span', { class: 'row', style: 'gap:4px' }, mark(setup.paths.storeDirWiki), mark(setup.paths.storeDirDb)),
+      ),
+      // a exportação lê o store LOCAL: a entrada só existe quando ele existe
+      (setup.paths.storeDirWiki && setup.paths.storeDirDb)
+        ? el('div', { class: 'row-between small' },
+            el('span', { class: 'muted', text: 'Exportação' }),
+            el('button', { class: 'btn btn-secondary btn-sm', text: 'Exportar memórias', onclick: () => { location.hash = 'export'; } }),
+          )
+        : null,
+    ] : [el('div', { class: 'small muted', text: 'diagnóstico indisponível' })];
+
     wrap.replaceChildren(
       el('div', { class: 'view-head' },
-        el('div', { class: 'row', style: 'gap:8px' }, chips),
+        el('div', { class: 'row', style: 'gap:8px' },
+          ...chips,
+          ACTIVE_SERVER
+            ? el('button', { class: 'chip chip-btn', text: `servidor: ${ACTIVE_SERVER.name}`, title: 'Trocar de servidor', onclick: () => { openServerManager(); } })
+            : null,
+        ),
         el('button', { class: 'btn btn-secondary btn-sm', text: 'Atualizar', onclick: load }),
       ),
       el('div', { class: 'grid grid-metrics' },
@@ -267,6 +1124,15 @@ VIEWS.dashboard = async (main) => {
           el('div', { class: 'row-between small' }, el('span', { class: 'muted', text: 'DB' }), el('span', { class: 'mono', text: s.db_path || '—' })),
         ),
         el('div', { class: 'card stack' },
+          el('div', { class: 'row-between' },
+            el('strong', { text: 'CLI e dados locais' }),
+            setup?.cli.ok
+              ? el('span', { class: 'chip chip-ok', text: `v${setup.cli.version}` })
+              : el('span', { class: 'chip chip-warn', text: 'CLI ausente' }),
+          ),
+          ...cliRows,
+        ),
+        el('div', { class: 'card stack' },
           el('strong', { text: 'Armazenamento' }),
           ...storageRows,
         ),
@@ -276,7 +1142,170 @@ VIEWS.dashboard = async (main) => {
   await load();
 };
 
-// ---------- view: manutenção ----------
+// ---------- view: logs do ai-memory ----------
+
+// Fontes: "cliente" (logs da CLI no data-dir do perfil ativo) e "servidor"
+// (volume do ai-memory local — só existe quando o ativo é o ambiente).
+VIEWS.logs = async (main) => {
+  const state = {
+    sources: null,          // resposta de /api/logs
+    source: 'client',
+    file: null,
+    tail: 400,
+    filter: '',
+    live: false,
+    es: null,               // EventSource do modo ao vivo
+    atBottom: true,
+  };
+
+  const wrap = el('div', { class: 'stack' });
+  main.append(wrap);
+
+  const sourceSel = el('select', { class: 'field', style: 'max-width:260px' });
+  const fileSel = el('select', { class: 'field', style: 'max-width:300px' });
+  const tailSel = el('select', { class: 'field', style: 'max-width:130px' },
+    el('option', { value: '200', text: 'últimas 200' }),
+    el('option', { value: '400', text: 'últimas 400', selected: true }),
+    el('option', { value: '1000', text: 'últimas 1000' }),
+    el('option', { value: '5000', text: 'últimas 5000' }),
+  );
+  const filterIn = el('input', { class: 'field', style: 'max-width:220px', placeholder: 'filtrar linhas…', autocomplete: 'off' });
+  const liveBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Ao vivo' });
+  const reloadBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Atualizar', onclick: () => loadContent() });
+  const note = el('div', { class: 'small muted' });
+  const logPanel = el('div', { class: 'log-panel', style: 'height:min(60vh, 640px)' }, el('div', { class: 'empty', text: 'carregando logs…' }));
+
+  logPanel.onscroll = () => {
+    state.atBottom = logPanel.scrollTop + logPanel.clientHeight >= logPanel.scrollHeight - 30;
+  };
+  filterIn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { state.filter = filterIn.value; state.live ? restartLive() : loadContent(); }
+  });
+  sourceSel.addEventListener('change', () => { state.source = sourceSel.value; pickNewestFile(); stopLive(); loadContent(); });
+  fileSel.addEventListener('change', () => { state.file = fileSel.value; stopLive(); loadContent(); });
+  tailSel.addEventListener('change', () => { state.tail = Number(tailSel.value); state.live ? restartLive() : loadContent(); });
+  liveBtn.addEventListener('click', () => { state.live ? stopLive() : startLive(); });
+  // sair da view encerra o stream (route() limpa o main, mas o ES sobreviveria)
+  window.addEventListener('hashchange', () => stopLive(), { once: true });
+
+  function stopLive() {
+    state.live = false;
+    if (state.es) { state.es.close(); state.es = null; }
+    liveBtn.classList.remove('btn-danger');
+    liveBtn.classList.add('btn-secondary');
+    liveBtn.textContent = 'Ao vivo';
+  }
+
+  function restartLive() { stopLive(); startLive(); }
+
+  function startLive() {
+    if (!state.file) return toast('escolha um arquivo de log', 'err');
+    state.live = true;
+    liveBtn.classList.remove('btn-secondary');
+    liveBtn.classList.add('btn-danger');
+    liveBtn.textContent = '■ parar';
+    const params = new URLSearchParams({ source: state.source, file: state.file });
+    if (state.filter) params.set('filter', state.filter);
+    logPanel.replaceChildren();
+    const es = new EventSource(`/api/logs/stream?${params}`);
+    state.es = es;
+    es.onmessage = (ev) => {
+      try {
+        const line = JSON.parse(ev.data);
+        appendLine(line);
+      } catch { /* ignora */ }
+    };
+    es.onerror = () => { /* reconexão é do EventSource; estado segue */ };
+  }
+
+  function appendLine(line) {
+    const keep = state.atBottom;
+    logPanel.append(el('span', { class: `log-line-${line.kind || 'out'}`, text: line.text }));
+    if (keep) logPanel.scrollTop = logPanel.scrollHeight;
+  }
+
+  function pickNewestFile() {
+    const src = state.sources?.[state.source];
+    const files = src?.files || [];
+    state.file = files[0]?.name || null;
+    renderFileOptions();
+  }
+
+  function renderFileOptions() {
+    const src = state.sources?.[state.source];
+    const files = src?.files || [];
+    fileSel.replaceChildren(
+      ...files.map((f) => el('option', {
+        value: f.name,
+        selected: f.name === state.file,
+        text: `${f.name} · ${fmtBytes(f.size) || `${f.size} B`}`,
+      })),
+    );
+    fileSel.disabled = !files.length;
+  }
+
+  async function loadSources() {
+    state.sources = await api('/api/logs');
+    const opts = [
+      ['client', `CLI do ai-memory (cliente)${state.sources.client.available ? '' : ' · vazia'}`],
+      ['server', `Servidor local (store)${state.sources.server.available ? '' : ' · indisponível'}`],
+    ];
+    sourceSel.replaceChildren(...opts.map(([v, t]) => el('option', { value: v, selected: state.source === v, text: t })));
+    pickNewestFile();
+    const src = state.sources[state.source];
+    note.textContent = src?.note || '';
+  }
+
+  async function loadContent() {
+    if (!state.file) {
+      const src = state.sources?.[state.source];
+      logPanel.replaceChildren(el('div', { class: 'empty', text: src?.note || 'nenhum arquivo de log nesta fonte' }));
+      return;
+    }
+    logPanel.replaceChildren(el('div', { class: 'empty', text: 'carregando…' }));
+    try {
+      const params = new URLSearchParams({ source: state.source, file: state.file, tail: String(state.tail) });
+      if (state.filter) params.set('filter', state.filter);
+      const out = await api(`/api/logs/content?${params}`);
+      if (!out.ok) {
+        logPanel.replaceChildren(el('div', { class: 'empty', text: out.error }));
+        return;
+      }
+      state.atBottom = true;
+      logPanel.replaceChildren();
+      for (const text of out.lines) appendLine({ kind: lineKind(text), text: `${text}\n` });
+      logPanel.scrollTop = logPanel.scrollHeight;
+      note.textContent = [
+        state.sources?.[state.source]?.note,
+        `${out.lines.length} linha(s)${out.filter ? ` · filtro "${out.filter}"` : ''} · ${fmtBytes(out.sizeBytes) || `${out.sizeBytes} B`} no arquivo`,
+        out.truncated ? `· janela limitada às últimas ${fmtBytes(out.readBytes) || `${out.readBytes} B`}` : null,
+      ].filter(Boolean).join(' · ');
+    } catch (err) {
+      logPanel.replaceChildren(el('div', { class: 'empty', text: `erro: ${err.message}` }));
+    }
+  }
+
+  function lineKind(line) {
+    if (/\bERROR\b/.test(line)) return 'err';
+    if (/\bWARN\b/.test(line)) return 'out';
+    if (/^INFO\b/.test(line) || /^\d{4}-\d{2}-\d{2}T/.test(line)) return 'out';
+    return 'sys';
+  }
+
+  wrap.append(
+    el('div', { class: 'view-head' },
+      el('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' },
+        sourceSel, fileSel, tailSel, filterIn, liveBtn, reloadBtn,
+      ),
+      note,
+    ),
+    logPanel,
+    el('div', { class: 'small muted', text: 'Cliente: logs da CLI no data-dir do perfil ativo (rotação por data). Servidor: volume do ai-memory LOCAL — quando o painel está conectado a outro ai-memory (ex.: VPS), os logs dele ficam na outra máquina.' }),
+  );
+
+  await loadSources();
+  await loadContent();
+};
 //
 // A tela é montada a partir do catálogo do servidor (server/spec.mjs):
 // escopo, efeitos colaterais, flags e confirmação vêm de lá — o frontend não
@@ -359,22 +1388,29 @@ async function showJob(jobId, panel, statusChip, { scopeNote = null } = {}) {
   let job;
   try {
     job = await api(`/api/jobs/${jobId}`);
-  } catch {
+  } catch (err) {
+    console.error('[aim] log do job indisponível:', jobId, err);
     toast('log indisponível: o painel foi reiniciado depois desta execução', 'err');
     return;
   }
   // outro clique aconteceu enquanto este buscava: o último vence
   if (seq !== showJobSeq) return;
   stopLogStream();
-  // o botão "ver log" abre o painel por aqui (ao contrário de um job novo, que
-  // já vem de um clique em Executar): sem isso o log roda num painel escondido
   panel.style.display = '';
   panel.dataset.onDone = 'history';
-  // job.args já começa pelo nome do comando (é o argv completo)
-  const argv = (job.args || []).length ? job.args.join(' ') : job.command;
-  panel.querySelector('[data-job-label]').textContent = [argv, scopeNote].filter(Boolean).join('   ·   ');
 
-  const log = panel.querySelector('.log-panel');
+  // Chamadores de manutenção passam um painel completo ([data-job-label] +
+  // .log-panel + chip de status). Chamadores leves — como o wizard de preparação —
+  // passam uma div simples e chip null: aqui a estrutura faltante é criada em
+  // vez de estourar em "Cannot set properties of null".
+  const label = panel.querySelector('[data-job-label]');
+  if (label) label.textContent = [job.args?.length ? job.args.join(' ') : job.command, scopeNote].filter(Boolean).join('   ·   ');
+
+  let log = panel.querySelector('.log-panel');
+  if (!log) {
+    log = el('div', { class: 'log-panel', style: 'max-height:220px; overflow:auto; margin:6px 0' });
+    panel.append(log);
+  }
   log.replaceChildren();
   log.dataset.autoscroll = 'true';
   // onscroll (e não addEventListener): showJob roda a cada "ver log" e os
@@ -383,8 +1419,10 @@ async function showJob(jobId, panel, statusChip, { scopeNote = null } = {}) {
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     log.dataset.autoscroll = String(atBottom);
   };
-  statusChip.className = 'chip chip-info';
-  statusChip.textContent = job.status === 'running' ? 'executando…' : 'carregando log…';
+  if (statusChip) {
+    statusChip.className = 'chip chip-info';
+    statusChip.textContent = job.status === 'running' ? 'executando…' : 'carregando log…';
+  }
 
   const es = new EventSource(`/api/jobs/${jobId}/stream`);
   activeEs = es;
@@ -400,8 +1438,11 @@ async function showJob(jobId, panel, statusChip, { scopeNote = null } = {}) {
     if (activeEs === es) activeEs = null;
     api(`/api/jobs/${jobId}`).then((j) => {
       const ok = j.status === 'ok';
-      statusChip.className = `chip ${ok ? 'chip-ok' : j.status === 'timeout' ? 'chip-warn' : 'chip-err'}`;
-      statusChip.textContent = `${j.status} · código ${j.exitCode ?? '?'} · ${fmtDuration(j.durationMs)}`;
+      if (statusChip) {
+        statusChip.className = `chip ${ok ? 'chip-ok' : j.status === 'timeout' ? 'chip-warn' : 'chip-err'}`;
+        statusChip.textContent = `${j.status} · código ${j.exitCode ?? '?'} · ${fmtDuration(j.durationMs)}`;
+      }
+      console.info(`[aim] job ${jobId} (${job.command}): ${j.status}, código ${j.exitCode}`);
       if (panel.dataset.onDone === 'history') refreshHistory(panel.parentElement);
     }).catch(() => {});
   });
@@ -618,6 +1659,12 @@ function commandCard(cmd, ctxInfo) {
   );
   return card;
 }
+
+// ---------- view: manutenção ----------
+//
+// A tela é montada a partir do catálogo do servidor (server/spec.mjs):
+// escopo, efeitos colaterais, flags e confirmação vêm de lá — o frontend não
+// repete metadado nenhum, então a tela não sai de sincronia com a whitelist.
 
 VIEWS.maintenance = async (main) => {
   const root = el('div', { class: 'stack' });
@@ -1508,6 +2555,9 @@ VIEWS.sessions = async (main) => {
           el('div', { class: 'small' },
             el('div', { style: 'font-weight:600', text: dirName }),
             s.workstream ? el('div', { class: 'muted', text: `workstream: ${s.workstream}` }) : null,
+            // a run fica presa ao servidor em que nasceu: trocar de servidor no
+            // painel não move uma sessão já aberta
+            s.server ? el('div', { class: 'muted mono', style: 'font-size:11px; word-break:break-all', text: `servidor: ${s.server.name}` }) : null,
             el('div', { class: 'mono muted', style: 'font-size:11px; word-break:break-all', text: s.cwd }),
             el('div', { class: 'muted', text: `iniciada ${timeAgo(s.createdAt)}` }),
             s.lostIo ? el('div', { class: 'small', style: 'color: var(--attention)', text: s.endedNote || 'perdida na reinicialização do painel' }) : null,
@@ -1682,13 +2732,34 @@ VIEWS.memories = async (main) => {
   const resultsNote = el('div', { class: 'small muted' });
 
   async function loadScopes() {
-    const { scopes } = await api('/api/scopes');
-    state.scopes = scopes;
+    // inventário completo: o que o SERVIDOR tem (admin/projects) cruzado com o
+    // que ESTA MÁQUINA vinculou (client-projects.json). O antigo /api/scopes só
+    // devolvia o segundo — numa máquina recém-instalada a lista saía vazia
+    // mesmo com o servidor cheio de projetos.
+    let inv = null;
+    try {
+      inv = await api('/api/server-scopes');
+    } catch {
+      inv = null;
+    }
+    const linked = (await api('/api/scopes').catch(() => ({ scopes: [] }))).scopes || [];
+
+    state.inventory = inv;
+    state.linked = linked;
+    const serverList = inv?.ok ? inv.projects.map((p) => ({ workspace: p.workspace, project: p.project, pages: p.pages, linked: p.linked, pathExists: p.pathExists })) : [];
+    state.scopes = serverList.length
+      ? serverList
+      : linked.map((s) => ({ workspace: s.workspace, project: s.project }));
+
     scopeSel.replaceChildren(
-      el('option', { value: 'global', text: '🌐 Global — todos os projetos' }),
-      ...scopes.map((s) => el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}` })),
+      el('option', { value: 'global', text: `🌐 Global — todos os projetos${inv?.ok ? ` (${inv.total} no servidor)` : ''}` }),
+      ...state.scopes.map((s) => {
+        const tag = s.linked === undefined ? '' : (s.linked ? ' · vinculada' : ' · só no servidor');
+        const pages = s.pages !== undefined ? ` (${s.pages} pág.)` : '';
+        return el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}${pages}${tag}` });
+      }),
     );
-    if (scopes.length) state.scopeKey = 'global';
+    if (state.scopes.length) state.scopeKey = 'global';
   }
 
   function currentScope() {
@@ -1823,10 +2894,13 @@ VIEWS.memories = async (main) => {
     else { state.items = []; renderResults(null, 'modo global: use a busca'); }
   });
 
+  const invNote = el('div', { class: 'small muted', style: 'margin-top:6px' });
+
   main.append(
     el('div', { class: 'card' },
       el('div', { class: 'row', style: 'flex-wrap:wrap' }, scopeSel, searchInput),
       el('div', { class: 'small muted', style: 'margin-top:6px', text: 'Busca global cobre todos os projetos; escolhendo um projeto, as páginas recentes aparecem sem digitar nada.' }),
+      invNote,
     ),
     el('div', { class: 'split' },
       el('div', { class: 'stack' }, resultsNote, resultList),
@@ -1835,6 +2909,23 @@ VIEWS.memories = async (main) => {
   );
 
   await loadScopes();
+
+  // a nota explica a diferença entre "o servidor tem" e "esta máquina vincula"
+  // — na instalação limpa o servidor tem dezenas e a máquina nenhuma, o que
+  // antes parecia bug
+  const inv = state.inventory;
+  if (inv?.ok) {
+    const semVinculo = inv.total - inv.linked;
+    invNote.replaceChildren(
+      el('div', { class: 'small muted', text: `${inv.total} projeto(s) no servidor (${inv.serverUrl}) · ${inv.linked} vinculados nesta máquina${semVinculo ? ` · ${semVinculo} ainda só no servidor` : ''}` }),
+      inv.linked === 0
+        ? el('div', { class: 'small', style: 'color:var(--attention)', text: 'Nenhum projeto vinculado a esta máquina ainda: o registry (client-projects.json) se preenche quando um harness com hooks captura daqui — `ai-memory run <harness>` num repositório faz isso sozinho (ele instala hooks + MCP na primeira execução).' })
+        : null,
+    );
+  } else if (inv && !inv.ok) {
+    invNote.replaceChildren(el('div', { class: 'small muted', text: `inventário do servidor indisponível: ${inv.error} — listando só os projetos vinculados nesta máquina` }));
+  }
+
   await runSearch();
 };
 
@@ -2604,6 +3695,24 @@ function importHelpModal() {
 // ---------- view: exportar bundle ----------
 
 VIEWS.export = async (main) => {
+  // deep link gateado: sem volume do store local, a exportação não tem o que
+  // ler — mostra o porquê em vez do casco da ferramenta (a entrada oficial é o
+  // botão condicional no card "CLI e dados locais" do dashboard)
+  const setup = SETUP || await api('/api/setup').catch(() => null);
+  if (setup && !(setup.paths.storeDirWiki && setup.paths.storeDirDb)) {
+    main.append(
+      el('div', { class: 'card stack', style: 'gap:8px' },
+        el('strong', { text: 'Exportação indisponível' }),
+        el('p', { class: 'small muted', style: 'margin:0', text: `A exportação lê o volume do store LOCAL (${setup.paths.storeDir}), que não existe nesta máquina — as memórias do servidor conectado (${setup.server.url}) ficam nele, não aqui.` }),
+        el('p', { class: 'small muted', style: 'margin:0', text: 'Quando existir um store local (Docker ou ai-memory local), a entrada volta no dashboard — card "CLI e dados locais".' }),
+        el('div', { class: 'row', style: 'gap:6px' },
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'Voltar ao painel', onclick: () => { location.hash = 'dashboard'; } }),
+        ),
+      ),
+    );
+    return;
+  }
+
   const state = {
     store: null,
     scopes: [],
@@ -2936,14 +4045,30 @@ VIEWS.skills = async (main) => {
     data: null,
     harness: 'todos',
     query: '',
-    tab: 'globais', // globais | workspaces
+    tab: 'globais', // globais | workspaces | colecao
     wsParent: '',
     wsData: null,
     wsError: null,
     wsLoading: false,
     wsDetail: null,
+    colData: null,
+    colError: null,
+    colQuery: '',
   };
   const list = el('div', { class: 'stack' });
+
+  // log dos jobs de bundle (export/import) — nó único: re-renders da aba
+  // re-usam o mesmo elemento, então o stream SSE sobrevive a eles
+  const colStatusChip = el('span', { class: 'chip', text: 'idle' });
+  const colLogCard = el(
+    'div',
+    { class: 'card stack', style: 'display:none' },
+    el('div', { class: 'row-between' },
+      el('div', { class: 'row' }, el('strong', { text: 'Log do bundle de skills' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
+      el('div', { class: 'row' }, colStatusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); colLogCard.style.display = 'none'; } })),
+    ),
+    el('div', { class: 'log-panel' }),
+  );
 
   async function load() {
     wrap.replaceChildren(el('div', { class: 'empty', text: 'carregando skills…' }));
@@ -2975,10 +4100,45 @@ VIEWS.skills = async (main) => {
           else loadWorkspaces();
         },
       }),
+      el('button', {
+        class: `subtab ${state.tab === 'colecao' ? 'active' : ''}`,
+        text: 'Coleção (gestor)',
+        title: 'Coleção própria do painel: instalar em harness/projeto, importar dos harnesses, versões e bundles',
+        onclick: () => {
+          state.tab = 'colecao';
+          if (state.colData || state.colError) { renderControls(); renderList(); }
+          else loadCollection();
+        },
+      }),
     );
 
     const parts = [tabs];
-    if (state.tab === 'workspaces') {
+    if (state.tab === 'colecao') {
+      const col = state.colData;
+      parts.push(
+        el('div', { class: 'row', style: 'flex-wrap:wrap' },
+          el('button', { class: 'btn btn-primary btn-sm', text: 'Importar do harness…', onclick: openImportFromHarness }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'Exportar bundle…', onclick: openExportBundle }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'Importar bundle…', onclick: openImportBundle }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: loadCollection }),
+        ),
+        colLogCard,
+        col
+          ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+              el('span', { class: 'chip mono', text: col.dir }),
+              el('span', { class: 'chip', text: `${col.totals.skills} skill(s) · ${col.totals.files} arquivo(s) · ${fmtBytes(col.totals.bytes) || '0 B'}` }),
+              el('span', { class: 'chip', text: `${(col.bundles?.bundles || []).length} bundle(s) de skills` }),
+            )
+          : el('div', { class: 'small muted', text: 'carregando coleção…' }),
+        state.colError ? el('div', { class: 'chip chip-err', text: state.colError }) : null,
+        el('input', {
+          class: 'field',
+          placeholder: 'buscar na coleção…',
+          value: state.colQuery,
+          oninput: (e) => { state.colQuery = e.target.value; renderCollection(); },
+        }),
+      );
+    } else if (state.tab === 'workspaces') {
       const parentInput = el('input', {
         class: 'field',
         placeholder: `diretório-pai (padrão: ${data?.home ? '~/projetos' : '~/projetos'})`,
@@ -3112,10 +4272,676 @@ VIEWS.skills = async (main) => {
   }
 
   function renderList() {
+    if (state.tab === 'colecao') return renderCollection();
     if (state.tab === 'workspaces') renderWorkspaces();
     else renderGlobalList();
   }
 
+  async function loadCollection() {
+    state.colData = null;
+    state.colError = null;
+    renderControls();
+    renderList();
+    try {
+      state.colData = await api('/api/collection/skills');
+    } catch (err) {
+      state.colError = err.message;
+    }
+    renderControls();
+    renderList();
+  }
+
+  /** Copia uma skill (de projeto ou de harness) para a coleção do gestor. */
+  async function copyToGestor({ name, harness, ws, kind }) {
+    try {
+      const out = await api('/api/collection/skills/import', {
+        method: 'POST',
+        body: { name, harness, kind: kind || (ws ? 'project' : 'user'), ws },
+      });
+      if (out.skipped) toast(`"${out.name}" já está na coleção (idêntica)`);
+      else toast(`"${out.name}" ${out.action} na coleção${out.snapshotId ? ` (estado anterior em v${out.snapshotId})` : ''}`, 'ok');
+      loadCollection();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }
+
+  // ---------- aba coleção (gestor de skills) ----------
+
+  function renderCollection() {
+    const data = state.colData;
+    if (state.colError) {
+      list.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `Erro: ${state.colError}` })));
+      return;
+    }
+    if (!data) {
+      list.replaceChildren(el('div', { class: 'empty', text: 'carregando coleção…' }));
+      return;
+    }
+    const q = state.colQuery.trim().toLowerCase();
+    let skills = data.skills;
+    if (q) skills = skills.filter((s) => s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q));
+
+    const parts = [];
+    if (skills.length) {
+      parts.push(sectionTitle(`Coleção · ${skills.length} skill(s) — instalar copia a pasta inteira (SKILL.md + recursos)`), ...skills.map(colSkillCard));
+    }
+    if (!q && data.deleted?.length) {
+      parts.push(sectionTitle(`Excluídas da coleção, com versões retidas · ${data.deleted.length}`), ...data.deleted.map(colDeletedCard));
+    }
+    if (!parts.length) {
+      list.replaceChildren(el('div', { class: 'empty', text: q ? 'nenhuma skill na coleção para essa busca' : 'coleção vazia — importe skills dos harnesses ("Importar do harness…") ou de um bundle' }));
+      return;
+    }
+    list.replaceChildren(...parts);
+  }
+
+  function colHarnessChips(skill) {
+    return (state.colData?.harnesses || []).map((h) => {
+      const on = (skill.installed || []).includes(h.id);
+      return el('span', {
+        class: on ? 'chip chip-ok' : 'chip',
+        style: on ? 'cursor:pointer' : 'opacity:.4',
+        text: h.label,
+        title: on ? `instalada em ${h.label} — clique para reinstalar/atualizar` : `não instalada em ${h.label} — clique para instalar`,
+        onclick: () => openCollectionInstall(skill, h.id),
+      });
+    });
+  }
+
+  /** Viewer completo (mesma view da aba Globais) com a coleção como fonte padrão. */
+  function openCollectionView(skill) {
+    const sources = [{
+      label: 'coleção do gerenciador',
+      title: skill.dir,
+      collection: true,
+      params: { name: skill.name },
+      preferred: true,
+    }];
+    for (const c of skill.copies || []) {
+      sources.push({
+        label: `${c.harness}${c.kind !== 'user' ? ` · ${c.kind}` : ''}`,
+        title: c.path,
+        params: { name: skill.name, harness: c.harness, kind: c.kind },
+      });
+    }
+    openSkillViewer({
+      title: skill.name,
+      managed: skill.managed,
+      badge: 'coleção',
+      onEdit: (src, rel) => openCollectionEditor(skill, rel),
+      sources,
+    });
+  }
+
+  function colSkillCard(skill) {
+    return el('div', { class: 'card stack' },
+      el('div', { class: 'row-between' },
+        el('strong', { text: skill.name }),
+        el('div', { class: 'row' },
+          skill.versions ? el('span', { class: 'chip chip-info', text: `${skill.versions} versão(ões)` }) : null,
+          el('span', { class: 'chip', text: `${skill.files} arquivo(s) · ${fmtBytes(skill.bytes) || '0 B'}` }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver…', title: 'arquivos e recursos com preview renderizado', onclick: () => openCollectionView(skill) }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'Editar…', title: 'editar o SKILL.md e arquivos de texto da skill (salvar cria uma versão do estado anterior)', onclick: () => openCollectionEditor(skill) }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'Versões…', onclick: () => openVersions(skill) }),
+          el('button', { class: 'btn btn-primary btn-sm', text: 'Instalar…', onclick: () => openCollectionInstall(skill) }),
+        ),
+      ),
+      skill.description
+        ? el('div', { class: 'small muted', text: skill.description.length > 240 ? `${skill.description.slice(0, 240)}…` : skill.description })
+        : null,
+      el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' }, colHarnessChips(skill)),
+    );
+  }
+
+  function colDeletedCard(item) {
+    return el('div', { class: 'card stack' },
+      el('div', { class: 'row-between' },
+        el('strong', { text: item.name }),
+        el('div', { class: 'row' },
+          el('span', { class: 'chip chip-warn', text: `${item.versions} versão(ões) retidas` }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'Restaurar versão…', onclick: () => openVersions({ name: item.name }) }),
+        ),
+      ),
+      el('div', { class: 'small muted', text: 'não está mais em <coleção>/<nome>; restaurar uma versão recria a pasta' }),
+    );
+  }
+
+  /** Preview do SKILL.md atual ou de uma versão registrada. */
+  function previewCollectionContent(name, version) {
+    const q = new URLSearchParams({ name });
+    if (version) q.set('version', String(version));
+    const box = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando…' }));
+    modal({ title: version ? `${name} · v${version} (SKILL.md)` : `${name} · SKILL.md da coleção`, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
+    api(`/api/collection/skills/content?${q}`).then(({ content }) => {
+      box.replaceChildren(el('div', { class: 'codeblock', style: 'max-height:60vh; overflow:auto', text: content }));
+    }).catch((err) => {
+      box.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+    });
+  }
+
+  /**
+   * Editor dos arquivos de texto da skill da coleção (SKILL.md + recursos).
+   * Salvar cria snapshot do estado anterior — o mesmo contrato das outras
+   * escritas do gestor.
+   */
+  async function openCollectionEditor(skill, initialRel = 'SKILL.md') {
+    let filesData;
+    try {
+      filesData = await api(`/api/collection/skills/files?name=${encodeURIComponent(skill.name)}`);
+    } catch (err) {
+      toast(err.message, 'err');
+      return;
+    }
+    const editable = filesData.files.filter((f) => f.editable);
+    if (!editable.length) {
+      toast(`"${skill.name}" não tem arquivos de texto editáveis`, 'err');
+      return;
+    }
+
+    const sel = el('select', { class: 'field' }, editable.map((f) => el('option', { value: f.rel, text: `${f.rel} · ${fmtBytes(f.size) || '0 B'}` })));
+    if (editable.some((f) => f.rel === initialRel)) sel.value = initialRel;
+    const ta = el('textarea', { class: 'field', style: 'min-height:48vh; white-space:pre; overflow:auto', spellcheck: 'false' });
+    const warn = el('div', { class: 'small', style: 'display:none; color: var(--attention)' });
+    const saveBtn = el('button', { class: 'btn btn-primary', text: 'Salvar', onclick: saveCurrent });
+    const closeFn = modal({
+      title: `Editar "${skill.name}"`,
+      wide: true,
+      bodyNode: el('div', { class: 'stack' },
+        editable.length > 1
+          ? el('div', { class: 'stack', style: 'gap:4px' }, el('div', { class: 'field-label', text: 'Arquivo' }), sel)
+          : null,
+        ta,
+        warn,
+        el('div', { class: 'small muted', text: 'salvar grava o arquivo e registra o estado anterior da skill como nova versão ("antes de editar").' }),
+      ),
+      actions: [{ label: 'Cancelar' }, saveBtn],
+    });
+
+    function checkFrontmatter() {
+      if (sel.value !== 'SKILL.md') {
+        warn.style.display = 'none';
+        return;
+      }
+      const hasFm = /^---\r?\n[\s\S]*?\r?\n---/.test(ta.value);
+      warn.style.display = hasFm ? 'none' : '';
+      warn.textContent = 'SKILL.md sem frontmatter — name/description deixam de ser lidos na listagem e nos harnesses.';
+    }
+
+    async function loadFile() {
+      ta.value = 'carregando…';
+      ta.disabled = true;
+      saveBtn.disabled = true;
+      warn.style.display = 'none';
+      warn.textContent = '';
+      try {
+        const data = await api(`/api/collection/skills/file?name=${encodeURIComponent(skill.name)}&rel=${encodeURIComponent(sel.value)}`);
+        if (data.kind !== 'text') {
+          ta.value = '';
+          warn.style.display = '';
+          warn.textContent = 'arquivo binário ou grande demais para editar por aqui.';
+          return;
+        }
+        ta.value = data.content;
+        ta.disabled = false;
+        saveBtn.disabled = false;
+        checkFrontmatter();
+      } catch (err) {
+        ta.value = '';
+        warn.style.display = '';
+        warn.textContent = `erro ao ler: ${err.message}`;
+      }
+    }
+
+    async function saveCurrent() {
+      saveBtn.disabled = true;
+      try {
+        const out = await api('/api/collection/skills/file', { method: 'POST', body: { name: skill.name, rel: sel.value, content: ta.value } });
+        if (out.same) toast(`${out.rel} já estava igual — nada salvo`);
+        else toast(`${out.rel} salvo — estado anterior em v${out.snapshotId}`, 'ok');
+        loadCollection();
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+      saveBtn.disabled = false;
+    }
+
+    sel.addEventListener('change', loadFile);
+    await loadFile();
+  }
+
+  function openCollectionInstall(skill, preselect) {
+    const targets = state.colData?.harnesses || [];
+    const sel = el('select', { class: 'field' }, targets.map((h) => el('option', { value: h.id, text: h.label })));
+    if (preselect && targets.some((h) => h.id === preselect)) sel.value = preselect;
+    else if (state.harness !== 'todos' && targets.some((h) => h.id === state.harness)) sel.value = state.harness;
+
+    const rbGlobal = el('input', { type: 'radio', name: 'col-skill-scope', value: 'global', checked: true });
+    const rbProject = el('input', { type: 'radio', name: 'col-skill-scope', value: 'project' });
+    const dirInput = el('input', {
+      class: 'field',
+      placeholder: 'diretório do projeto (ex.: ~/projetos/meu-app)',
+      list: 'dir-suggestions',
+      autocomplete: 'off',
+      disabled: true,
+    });
+    const syncScope = () => { dirInput.disabled = !rbProject.checked; };
+    rbGlobal.addEventListener('change', syncScope);
+    rbProject.addEventListener('change', syncScope);
+
+    const warn = el('div', { class: 'small', style: 'display:none; color: var(--attention); white-space:pre-wrap' });
+    let forceMode = false;
+    let closeFn = null;
+
+    const run = (force) => {
+      const payload = { name: skill.name, harness: sel.value, scope: rbProject.checked ? 'project' : 'global', force };
+      if (payload.scope === 'project') {
+        if (!dirInput.value.trim()) {
+          toast('informe o diretório do projeto', 'err');
+          return;
+        }
+        payload.projectDir = dirInput.value.trim();
+      }
+      api('/api/collection/skills/install', { method: 'POST', body: payload })
+        .then((out) => {
+          closeFn?.();
+          toast(`skill instalada em ${out.path}`, 'ok');
+          loadCollection();
+        })
+        .catch((err) => {
+          if (err.needsForce) {
+            forceMode = true;
+            warn.style.display = '';
+            warn.textContent = err.message;
+            installBtn.textContent = 'Forçar instalação…';
+          } else {
+            toast(err.message, 'err');
+          }
+        });
+    };
+
+    const installBtn = el('button', {
+      class: 'btn btn-primary',
+      text: 'Instalar',
+      onclick: () => {
+        if (forceMode) {
+          confirmModal({
+            title: 'Forçar instalação',
+            message: `"${skill.name}" já existe no destino sem o marker gerenciado e será sobrescrita — a pasta atual vai para o root de backups (.skill-backups). Continuar?`,
+            word: 'instalar',
+            onConfirm: () => run(true),
+          });
+        } else {
+          run(false);
+        }
+      },
+    });
+
+    closeFn = modal({
+      title: `Instalar "${skill.name}" da coleção`,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'field-label', text: 'Harness de destino' }),
+        sel,
+        el('div', { class: 'row', style: 'gap:16px' },
+          el('label', { class: 'check', style: 'display:flex; gap:6px; align-items:center' }, rbGlobal, 'Global (~ do harness)'),
+          el('label', { class: 'check', style: 'display:flex; gap:6px; align-items:center' }, rbProject, 'Projeto'),
+        ),
+        dirInput,
+        el('div', { class: 'small muted', text: `conteúdo: pasta completa da coleção (${skill.files ?? '?'} arquivo(s)) — scripts e referências vão junto` }),
+        warn,
+      ),
+      actions: [{ label: 'Cancelar' }, installBtn],
+    });
+  }
+
+  async function openVersions(skill) {
+    const box = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando versões…' }));
+    modal({ title: `Versões de "${skill.name}"`, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
+
+    async function reload() {
+      let data;
+      try {
+        data = await api(`/api/collection/skills/versions?name=${encodeURIComponent(skill.name)}`);
+      } catch (err) {
+        box.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+        return;
+      }
+      const noteInput = el('input', { class: 'field', placeholder: 'nota da versão (opcional)', autocomplete: 'off' });
+      const saveBtn = el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: 'Salvar versão agora',
+        disabled: !data.inCollection,
+        title: data.inCollection ? '' : 'a skill não está mais na coleção',
+        onclick: async () => {
+          try {
+            const out = await api('/api/collection/skills/version', { method: 'POST', body: { name: skill.name, note: noteInput.value.trim() || null } });
+            toast(`versão ${out.version} salva`, 'ok');
+            loadCollection();
+            reload();
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        },
+      });
+
+      const rows = data.versions.map((v) => el('div', { class: 'imp-item' },
+        el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('strong', { text: `v${v.id}` }),
+            el('span', { class: 'chip', text: timeAgo(v.createdAt) || new Date(v.createdAt).toLocaleString() }),
+            el('span', { class: 'chip', text: `${v.files} arquivo(s) · ${fmtBytes(v.bytes) || '0 B'}` }),
+            v.sha256 ? el('span', { class: 'chip mono', text: v.sha256.slice(0, 8) }) : null,
+            v.source && v.source !== 'manual' ? el('span', { class: 'chip chip-info', text: v.source }) : null,
+            !v.exists ? el('span', { class: 'chip chip-warn', text: 'snapshot ausente no disco' }) : null,
+          ),
+          v.note ? el('div', { class: 'small muted', text: v.note }) : null,
+        ),
+        el('div', { class: 'row', style: 'gap:4px' },
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver', disabled: !v.exists, onclick: () => previewCollectionContent(skill.name, v.id) }),
+          el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: 'restaurar',
+            disabled: !v.exists,
+            onclick: () => confirmModal({
+              title: `Restaurar v${v.id} de "${skill.name}"`,
+              message: `A pasta atual da coleção será substituída pelo conteúdo de v${v.id}. O estado atual é salvo antes como nova versão ("antes de restaurar").`,
+              word: 'restaurar',
+              onConfirm: async () => {
+                try {
+                  const out = await api('/api/collection/skills/restore', { method: 'POST', body: { name: skill.name, version: v.id } });
+                  toast(`v${out.restored} restaurada (${out.files} arquivo(s)${out.snapshotId ? `, estado anterior salvo em v${out.snapshotId}` : ''})`, 'ok');
+                  loadCollection();
+                  reload();
+                } catch (err) {
+                  toast(err.message, 'err');
+                }
+              },
+            }),
+          }),
+        ),
+      ));
+
+      box.replaceChildren(
+        el('div', { class: 'small muted', text: data.inCollection
+          ? 'Snapshots vivem em .versions/ dentro da coleção. Importar por cima, restaurar e "Salvar versão" registram o estado atual antes de mudar.'
+          : 'Esta skill não está mais na coleção — restaurar uma versão recria a pasta.' }),
+        el('div', { class: 'row', style: 'flex-wrap:wrap' }, noteInput, saveBtn),
+        data.versions.length
+          ? el('div', { class: 'stack', style: 'gap:6px' }, ...rows)
+          : el('div', { class: 'small muted', text: 'nenhuma versão registrada ainda' }),
+      );
+    }
+
+    await reload();
+  }
+
+  async function openImportFromHarness() {
+    const targets = state.colData?.harnesses || [];
+    if (!targets.length) {
+      toast('nenhum harness conhecido', 'err');
+      return;
+    }
+    const selH = el('select', { class: 'field' }, targets.map((h) => el('option', { value: h.id, text: h.label })));
+    // aproveita o filtro de harness ativo na listagem, se houver
+    if (state.harness !== 'todos' && targets.some((h) => h.id === state.harness)) selH.value = state.harness;
+
+    const listBox = el('div', { class: 'stack', style: 'gap:6px; max-height:46vh; overflow:auto' },
+      el('div', { class: 'small muted', text: 'carregando skills do harness…' }));
+    const countChip = el('span', { class: 'chip chip-info', text: '0 selecionada(s)' });
+    const boxes = new Map(); // nome -> { cb, item }
+    const importBtn = el('button', { class: 'btn btn-primary', text: 'Importar selecionadas', disabled: true, onclick: run });
+    const closeFn = modal({
+      title: 'Importar skills do harness para a coleção',
+      wide: true,
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'field-label', text: 'Harness de origem' }),
+        selH,
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' },
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'todos', onclick: () => pick(true) }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'nenhum', onclick: () => pick(false) }),
+          countChip,
+        ),
+        listBox,
+        el('div', { class: 'small muted', text: 'a cópia para a coleção inclui os arquivos da skill (scripts, referências, assets). Importar por cima de uma versão divergente salva o estado atual como nova versão.' }),
+      ),
+      actions: [{ label: 'Cancelar' }, importBtn],
+    });
+
+    function syncCount() {
+      const n = [...boxes.values()].filter((v) => v.cb.checked).length;
+      countChip.textContent = `${n} selecionada(s)`;
+      importBtn.disabled = n === 0;
+    }
+    function pick(on) {
+      for (const v of boxes.values()) v.cb.checked = on;
+      syncCount();
+    }
+
+    async function loadHarness() {
+      boxes.clear();
+      listBox.replaceChildren(el('div', { class: 'small muted', text: 'carregando skills do harness…' }));
+      let data;
+      try {
+        data = await api(`/api/collection/harness-skills?harness=${encodeURIComponent(selH.value)}`);
+      } catch (err) {
+        listBox.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+        return;
+      }
+      if (!data.skills.length) {
+        listBox.replaceChildren(el('div', { class: 'small muted', text: `nenhuma skill em ${data.label || selH.value}` }));
+        syncCount();
+        return;
+      }
+      const rows = data.skills.map((s) => {
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = !s.exists || s.same === false; // padrão: o que fará algo (nova ou diverge)
+        cb.addEventListener('change', syncCount);
+        boxes.set(s.name, { cb, item: s });
+        return el('div', { class: 'imp-item' },
+          el('label', { class: 'check', style: 'align-self:flex-start; margin-top:2px' }, cb),
+          el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+            el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+              el('strong', { style: 'font-size:13px', text: s.name }),
+              ...(s.kinds || []).map((k) => el('span', { class: 'chip', text: k })),
+              s.managedOnly ? el('span', { class: 'chip chip-info', text: 'catálogo ai-memory' }) : null,
+              s.exists
+                ? el('span', { class: `chip ${s.same ? 'chip-ok' : 'chip-warn'}`, text: s.same ? 'na coleção · idêntica' : 'na coleção · diverge' })
+                : el('span', { class: 'chip chip-info', text: 'nova' }),
+              s.fileCount != null ? el('span', { class: 'chip', text: `${s.fileCount} arquivo(s) · ${fmtBytes(s.bytes) || '0 B'}` }) : null,
+            ),
+            s.description ? el('div', { class: 'small muted', text: s.description.slice(0, 200) }) : null,
+          ),
+        );
+      });
+      listBox.replaceChildren(el('div', { class: 'stack', style: 'gap:6px' }, ...rows));
+      syncCount();
+    }
+
+    async function run() {
+      const items = [...boxes.entries()]
+        .filter(([, v]) => v.cb.checked)
+        .map(([name, v]) => ({ name, harness: selH.value, kind: v.item.managedOnly ? 'managed' : (v.item.kinds || [])[0] }));
+      if (!items.length) return;
+      importBtn.disabled = true;
+      countChip.textContent = `importando ${items.length} skill(s)…`;
+      let out;
+      try {
+        out = await api('/api/collection/skills/import-batch', { method: 'POST', body: { items } });
+      } catch (err) {
+        toast(err.message, 'err');
+        importBtn.disabled = false;
+        syncCount();
+        return;
+      }
+      closeFn?.();
+      const parts = [];
+      if (out.created) parts.push(`${out.created} criada(s)`);
+      if (out.updated) parts.push(`${out.updated} atualizada(s)`);
+      if (out.same) parts.push(`${out.same} já idêntica(s)`);
+      const errors = out.results.filter((r) => r.action === 'erro');
+      toast(`importação: ${parts.join(', ') || 'nada a fazer'}${errors.length ? `, ${errors.length} erro(s)` : ''}`, errors.length ? 'err' : 'ok');
+      if (errors.length) toast(`${errors[0].name}: ${errors[0].error}`, 'err');
+      loadCollection();
+    }
+
+    selH.addEventListener('change', loadHarness);
+    await loadHarness();
+  }
+
+  function watchCollectionJob(started, doneMsg) {
+    colLogCard.style.display = '';
+    showJob(started.id, colLogCard, colStatusChip);
+    const watch = setInterval(async () => {
+      let j;
+      try {
+        j = await api(`/api/jobs/${started.id}`);
+      } catch {
+        clearInterval(watch);
+        return;
+      }
+      if (j.status === 'running') return;
+      clearInterval(watch);
+      toast(j.status === 'ok' ? doneMsg : `operação terminou com ${j.status}`, j.status === 'ok' ? 'ok' : 'err');
+      loadCollection();
+    }, 1000);
+  }
+
+  function openExportBundle() {
+    const nameInput = el('input', { class: 'field mono', placeholder: 'nome do arquivo (opcional)', autocomplete: 'off' });
+    const exportBtn = el('button', {
+      class: 'btn btn-primary',
+      text: 'Exportar bundle',
+      onclick: async () => {
+        let started;
+        try {
+          started = await api('/api/collection/bundle/export', { method: 'POST', body: { name: nameInput.value.trim() || null } });
+        } catch (err) {
+          toast(err.message, 'err');
+          return;
+        }
+        closeFn?.();
+        watchCollectionJob(started, 'bundle de skills pronto');
+      },
+    });
+    const closeFn = modal({
+      title: 'Exportar bundle de skills',
+      bodyNode: el('div', { class: 'stack' },
+        el('div', { class: 'small', text: 'Gera um .tar.gz com todas as skills da coleção (SKILL.md + recursos) e grava na pasta de exports de skills. O histórico de versões não entra — só o estado atual.' }),
+        el('div', { class: 'small muted mono', text: `destino: ${state.colData?.bundles?.dir || ''}` }),
+        nameInput,
+      ),
+      actions: [{ label: 'Cancelar' }, exportBtn],
+    });
+  }
+
+  function openImportBundle() {
+    const data = state.colData;
+    const bundles = data?.bundles?.bundles || [];
+    const sel = el('select', { class: 'field' }, bundles.map((b) => el('option', {
+      value: b.file,
+      text: `${b.file}${b.skills != null ? ` · ${b.skills} skill(s)` : ''}${b.exportedAt ? ` · ${timeAgo(Date.parse(b.exportedAt))}` : ''}`,
+    })));
+    const pathInput = el('input', { class: 'field mono', placeholder: '…ou caminho de um .tar.gz (sob o home)', autocomplete: 'off' });
+    const chosen = () => pathInput.value.trim() || sel.value || '';
+    const bodyBox = el('div', { class: 'stack' },
+      bundles.length
+        ? el('div', { class: 'stack', style: 'gap:4px' }, el('div', { class: 'field-label', text: 'Bundles na pasta de exports' }), sel)
+        : el('div', { class: 'small muted', text: `nenhum bundle em ${data?.bundles?.dir || ''} — informe um caminho` }),
+      pathInput,
+      el('div', { class: 'small muted', text: 'O scan lista as skills do arquivo e compara com a coleção; a importação acontece depois da revisão.' }),
+    );
+    const closeFn = modal({ title: 'Importar bundle de skills', wide: true, bodyNode: bodyBox, actions: [{ label: 'Cancelar' }] });
+
+    async function doScan() {
+      const file = chosen();
+      if (!file) {
+        toast('escolha ou informe o arquivo do bundle', 'err');
+        return;
+      }
+      scanBtn.disabled = true;
+      let scan;
+      try {
+        scan = await api('/api/collection/bundle/scan', { method: 'POST', body: { file } });
+      } catch (err) {
+        scanBtn.disabled = false;
+        toast(err.message, 'err');
+        return;
+      }
+      scanBtn.disabled = false;
+      renderResults(scan);
+    }
+    const scanBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Escanear', onclick: doScan });
+
+    const scanRow = el('div', { class: 'row' }, scanBtn);
+
+    function renderResults(scan) {
+      const boxes = new Map(); // nome -> checkbox
+      const updateCb = el('input', { type: 'checkbox', checked: true });
+      const rows = scan.skills.map((s) => {
+        const cb = el('input', { type: 'checkbox', checked: true });
+        boxes.set(s.name, cb);
+        return el('div', { class: 'imp-item' },
+          el('label', { class: 'check', style: 'align-self:flex-start; margin-top:2px' }, cb),
+          el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+            el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+              el('strong', { style: 'font-size:13px', text: s.name }),
+              s.exists
+                ? el('span', { class: `chip ${s.same ? 'chip-ok' : 'chip-warn'}`, text: s.same ? 'na coleção · idêntica' : 'na coleção · diverge' })
+                : el('span', { class: 'chip chip-info', text: 'nova' }),
+              el('span', { class: 'chip', text: `${s.files} arquivo(s) · ${fmtBytes(s.bytes) || '0 B'}` }),
+            ),
+            s.description ? el('div', { class: 'small muted', text: s.description.slice(0, 200) }) : null,
+          ),
+        );
+      });
+      const pick = (on) => () => { for (const cb of boxes.values()) cb.checked = on; };
+
+      const importBtn = el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: 'Importar selecionadas',
+        onclick: async () => {
+          const names = [...boxes.entries()].filter(([, cb]) => cb.checked).map(([name]) => name);
+          if (!names.length) {
+            toast('selecione ao menos uma skill', 'err');
+            return;
+          }
+          importBtn.disabled = true;
+          let started;
+          try {
+            started = await api('/api/collection/bundle/import', { method: 'POST', body: { file: scan.file, names, update: updateCb.checked } });
+          } catch (err) {
+            importBtn.disabled = false;
+            toast(err.message, 'err');
+            return;
+          }
+          closeFn?.();
+          watchCollectionJob(started, 'importação do bundle concluída');
+        },
+      });
+
+      // replaceChildren não tolera null (viraria texto "null" na tela)
+      bodyBox.replaceChildren(...[
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+          el('span', { class: 'chip chip-info', text: `${scan.skills.length} skill(s) no bundle` }),
+          el('span', { class: 'chip mono', text: String(scan.file).split('/').pop() }),
+        ),
+        scan.warnings?.length ? el('div', { class: 'small', style: 'color:var(--attention)', text: `avisos: ${scan.warnings.slice(0, 4).join(' · ')}` }) : null,
+        el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' },
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'todos', onclick: pick(true) }),
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'nenhum', onclick: pick(false) }),
+          el('label', { class: 'check', style: 'display:flex; gap:6px; align-items:center' }, updateCb, 'atualizar divergentes (estado atual vira versão)'),
+        ),
+        el('div', { class: 'stack', style: 'gap:6px' }, ...rows),
+        el('div', { class: 'row' }, importBtn),
+      ].filter(Boolean));
+      // o scan pode ser refeito (ex.: coleção mudou desde o último scan)
+      bodyBox.append(scanRow);
+    }
+
+    bodyBox.append(scanRow);
+  }
+
+  await load();
   function renderGlobalList() {
     const data = state.data;
     const q = state.query.trim().toLowerCase();
@@ -3214,11 +5040,18 @@ VIEWS.skills = async (main) => {
           sk.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
           el('button', {
             class: 'btn btn-secondary btn-sm',
+            text: 'copiar p/ Gestor',
+            title: `copia a pasta da skill (${d.name}) para a coleção do gestor — importar por cima de divergente salva o estado atual como versão`,
+            onclick: () => copyToGestor({ name: sk.name, harness: h.id, ws: d.dir }),
+          }),
+          el('button', {
+            class: 'btn btn-secondary btn-sm',
             text: 'SKILL.md',
             onclick: () => openSkillViewer({
               title: `${sk.name} · ${d.name}`,
               managed: sk.managed,
-              sources: [{ label: `${h.label} · projeto`, title: sk.path, params: { name: sk.name, harness: h.id, ws: d.dir } }],
+              sources: [{ label: `${h.label} · projeto`, title: sk.path, params: { name: sk.name, harness: h.id, ws: d.dir }, project: true }],
+              onCopy: (src) => copyToGestor({ name: src.params.name, harness: src.params.harness, ws: src.params.ws }),
             }),
           }),
         ),
@@ -3230,7 +5063,7 @@ VIEWS.skills = async (main) => {
   }
 
   /** Viewer compartilhado: SKILL.md renderizado + árvore de arquivos por fonte. */
-  async function openSkillViewer({ title, managed, diverged, sources }) {
+  async function openSkillViewer({ title, managed, diverged, badge, onEdit, onCopy, sources }) {
     let index = Math.max(0, sources.findIndex((s) => s.preferred));
 
     const headRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px' });
@@ -3238,6 +5071,15 @@ VIEWS.skills = async (main) => {
     const treePane = el('div', { class: 'stack', style: 'gap:4px' });
     const viewPane = el('div', { class: 'stack' });
     let activeFile = 'SKILL.md';
+
+    // ações do rodapé dependem da fonte ativa: editar só na coleção, copiar
+    // para o gestor só em cópia de projeto
+    const editBtn = typeof onEdit === 'function'
+      ? el('button', { class: 'btn btn-secondary', text: 'Editar arquivo atual…', onclick: () => onEdit(sources[index], activeFile) })
+      : null;
+    const copyBtn = typeof onCopy === 'function'
+      ? el('button', { class: 'btn btn-secondary', text: 'Copiar para o Gestor…', title: 'copia esta skill de projeto para a coleção do gestor', onclick: () => onCopy(sources[index]) })
+      : null;
 
     modal({
       title: `${title} · SKILL.md`,
@@ -3254,10 +5096,11 @@ VIEWS.skills = async (main) => {
           el('div', { class: 'stack', style: 'max-height:58vh; overflow:auto' }, viewPane),
         ),
       ),
-      actions: [{ label: 'Fechar' }],
+      actions: [...(editBtn ? [editBtn] : []), ...(copyBtn ? [copyBtn] : []), { label: 'Fechar' }],
     });
 
     headRow.replaceChildren(...[
+      badge ? el('span', { class: 'chip chip-info', text: badge }) : null,
       managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : el('span', { class: 'chip', text: 'skill de terceiros' }),
       diverged ? el('span', { class: 'chip chip-warn', text: 'cópias diferentes', title: 'mesmo nome, conteúdos diferentes entre harnesses' }) : null,
     ].filter(Boolean));
@@ -3269,6 +5112,8 @@ VIEWS.skills = async (main) => {
         title: s.title || '',
         onclick: () => { index = i; activeFile = 'SKILL.md'; renderSrcRow(); loadCopy(); },
       })));
+      if (editBtn) editBtn.style.display = sources[index].collection ? '' : 'none';
+      if (copyBtn) copyBtn.style.display = sources[index].project ? '' : 'none';
     };
 
     function renderMarkdownInto(pane, content) {
@@ -3293,8 +5138,10 @@ VIEWS.skills = async (main) => {
       }
       viewPane.replaceChildren(el('div', { class: 'empty', text: `carregando ${rel}…` }));
       try {
-        const q = new URLSearchParams({ ...sources[index].params, rel });
-        const file = await api(`/api/skills/file?${q}`);
+        const src = sources[index];
+        const base = src.collection ? '/api/collection/skills/file' : '/api/skills/file';
+        const q = new URLSearchParams({ ...src.params, rel });
+        const file = await api(`${base}?${q}`);
         if (file.kind === 'image') {
           viewPane.replaceChildren(
             el('div', { class: 'small muted mono', text: `${file.rel} · ${fmtBytes(file.size) ?? ''}` }),
@@ -3358,9 +5205,11 @@ VIEWS.skills = async (main) => {
       }
       treePane.replaceChildren(el('div', { class: 'empty', text: 'carregando arquivos…' }));
       try {
-        const { files, dir } = await api(`/api/skills/files?${new URLSearchParams(src.params)}`);
-        treePane.append(el('div', { class: 'small muted mono', style: 'word-break:break-all', text: dir }));
+        const base = src.collection ? '/api/collection/skills/files' : '/api/skills/files';
+        const { files, dir } = await api(`${base}?${new URLSearchParams(src.params)}`);
         renderTree(files);
+        // depois de renderTree, que faz replaceChildren e apagaria a linha
+        if (dir) treePane.append(el('div', { class: 'small muted mono', style: 'word-break:break-all', text: dir }));
         await openFile('SKILL.md');
       } catch (err) {
         treePane.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
@@ -3908,5 +5757,10 @@ VIEWS.skills = async (main) => {
 
 // ---------- init ----------
 
-refreshServerChip();
+// No boot, o diagnóstico roda antes de tudo: se não há nada configurado
+// (máquina nova, CLI ausente, sem servidor), o wizard de preparação se abre
+// sozinho — é o que guia a instalação e o cadastro do servidor.
+refreshServerChip().then(() => {
+  if (SETUP?.firstRun) openSetupWizard();
+});
 route();
