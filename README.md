@@ -23,6 +23,20 @@ npm start
 # abre http://127.0.0.1:4790
 ```
 
+## Telas
+
+Capturas reais do painel (as mesmas que a documentação abaixo descreve):
+
+| Painel | Manutenção |
+| --- | --- |
+| ![Painel: métricas do servidor, CLI local e armazenamento](docs/images/painel.png) | ![Manutenção: catálogo de comandos com escopo e efeitos](docs/images/manutencao.png) |
+| **Memórias** | **Sessões run** |
+| ![Memórias: busca por escopo e leitor de página](docs/images/memorias.png) | ![Sessões: início de run com harness e terminal embutido](docs/images/sessoes.png) |
+| **Importar** | **Logs** |
+| ![Importar: fontes Grok, Kiro e bundle com scan somente leitura](docs/images/importar.png) | ![Logs: cauda com filtro e modo ao vivo](docs/images/logs.png) |
+| **Skills — catálogo dos harnesses** | **Skills — Coleção (gestor)** |
+| ![Skills: catálogo dos roots com cópias por harness](docs/images/skills-globais.png) | ![Coleção: skills do painel com versões e bundle](docs/images/skills-colecao.png) |
+
 ## O que tem
 
 ### Primeiro uso: preparar o painel

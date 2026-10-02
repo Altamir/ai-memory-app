@@ -3061,12 +3061,14 @@ VIEWS.memories = async (main) => {
   const inv = state.inventory;
   if (inv?.ok) {
     const semVinculo = inv.total - inv.linked;
-    invNote.replaceChildren(
+    invNote.replaceChildren(...[
       el('div', { class: 'small muted', text: `${inv.total} projeto(s) no servidor (${inv.serverUrl}) · ${inv.linked} vinculados nesta máquina${semVinculo ? ` · ${semVinculo} ainda só no servidor` : ''}` }),
+      // replaceChildren(null) renderiza a string "null" — espalha um array para
+      // poder omitir o aviso quando já há projeto vinculado
       inv.linked === 0
         ? el('div', { class: 'small', style: 'color:var(--attention)', text: 'Nenhum projeto vinculado a esta máquina ainda: o registry (client-projects.json) se preenche quando um harness com hooks captura daqui — `ai-memory run <harness>` num repositório faz isso sozinho (ele instala hooks + MCP na primeira execução).' })
         : null,
-    );
+    ].filter(Boolean));
   } else if (inv && !inv.ok) {
     invNote.replaceChildren(el('div', { class: 'small muted', text: `inventário do servidor indisponível: ${inv.error} — listando só os projetos vinculados nesta máquina` }));
   }
