@@ -1660,6 +1660,91 @@ function commandCard(cmd, ctxInfo) {
   return card;
 }
 
+// ---------- busca de projeto/workspace ----------
+//
+// O seletor de escopo é um <select>: serve quando a lista é curta, mas o
+// inventário do servidor é de dezenas de projetos (e o <select> só costuma
+// mostrar os vinculados na máquina). A busca é o caminho para achar um
+// workspace/projeto pelo nome ou pelo caminho local.
+
+const normText = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+/**
+ * Modal com filtro por workspace, projeto ou caminho. `entries` são
+ * { workspace, project, path, pages, linked, pathExists }.
+ */
+function projectPickerModal({ entries, current, onPick }) {
+  let closeFn = null;
+  const search = el('input', { class: 'field', placeholder: 'filtrar por workspace, projeto ou caminho…', autocomplete: 'off' });
+  const list = el('div', { class: 'stack', style: 'gap:6px; max-height:420px; overflow-y:auto' });
+  const note = el('div', { class: 'small muted' });
+
+  const rows = () => {
+    const q = normText(search.value.trim());
+    if (!q) return entries;
+    return entries.filter((e) => normText(`${e.workspace} ${e.project} ${e.path || ''}`).includes(q));
+  };
+
+  const choose = (e) => {
+    closeFn?.();
+    onPick(e);
+  };
+
+  function render() {
+    const found = rows();
+    const q = search.value.trim();
+    note.textContent = q
+      ? `${found.length} de ${entries.length} projeto(s)`
+      : `${entries.length} projeto(s) — filtre por workspace, projeto ou caminho`;
+    if (!found.length) {
+      list.replaceChildren(el('div', {
+        class: 'empty',
+        text: entries.length
+          ? 'nenhum projeto bate com o filtro — feche e use "digitar workspace/projeto" para apontar na mão'
+          : 'nenhum projeto conhecido: o servidor não respondeu e nada está vinculado nesta máquina',
+      }));
+      return;
+    }
+    list.replaceChildren(...found.map((e) => {
+      const key = `${e.workspace}/${e.project}`;
+      const chips = [];
+      if (e.pages !== undefined && e.pages !== null) chips.push(el('span', { class: 'chip', text: `${e.pages} pág.` }));
+      if (e.linked) chips.push(el('span', { class: 'chip chip-ok', text: e.pathExists ? 'vinculada · pasta existe' : 'vinculada · pasta ausente' }));
+      else chips.push(el('span', { class: 'chip', text: 'só no servidor' }));
+      return el('div', {
+        class: `result-item ${key === current ? 'active' : ''}`,
+        title: 'usar este projeto como escopo',
+        onclick: () => choose(e),
+      },
+        el('div', { class: 'row-between' },
+          el('strong', { style: 'font-size:13px', text: `${e.workspace} / ${e.project}` }),
+          key === current ? el('span', { class: 'chip chip-info', text: 'escopo atual' }) : null,
+        ),
+        chips.length ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:4px; margin-top:6px' }, chips) : null,
+        e.path ? el('div', { class: 'mono small muted', style: 'margin-top:4px', text: e.path }) : null,
+      );
+    }));
+  }
+
+  search.addEventListener('input', render);
+  // Enter pega o primeiro resultado — quem digita o nome do projeto não precisa
+  // chegar no mouse
+  search.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    const first = rows()[0];
+    if (first) choose(first);
+  });
+
+  render();
+  closeFn = modal({
+    title: 'Buscar projeto / workspace',
+    bodyNode: el('div', { class: 'stack' }, search, note, list),
+    actions: [{ label: 'Fechar' }],
+  });
+  setTimeout(() => search.focus(), 50);
+}
+
 // ---------- view: manutenção ----------
 //
 // A tela é montada a partir do catálogo do servidor (server/spec.mjs):
@@ -1710,8 +1795,57 @@ VIEWS.maintenance = async (main) => {
   const scopeSel = el('select', { class: 'field', style: 'max-width:340px' });
   const wsInput = el('input', { class: 'field', style: 'max-width:180px', placeholder: 'workspace', autocomplete: 'off' });
   const projInput = el('input', { class: 'field', style: 'max-width:220px', placeholder: 'projeto', autocomplete: 'off' });
-  const manualRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px; display:none' }, wsInput, projInput);
+  const manualRow = el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px', display: 'none' }, wsInput, projInput);
   const effectiveChip = el('span', { class: 'chip chip-info' });
+
+  // A busca usa o inventário do SERVIDOR (admin/projects), não só os projetos
+  // vinculados nesta máquina: é o único jeito de achar um projeto que o painel
+  // nunca vinculou. Se o servidor não responder, cai na lista local + órfãos.
+  let pickEntries = scopes.map((s) => ({ workspace: s.workspace, project: s.project, path: s.path || null }));
+  let inventoryNote = null;
+
+  async function loadPickEntries() {
+    try {
+      const inv = await api('/api/server-scopes');
+      if (!inv?.ok) { inventoryNote = inv?.error || 'servidor não respondeu'; return; }
+      const known = new Set(pickEntries.map((e) => `${e.workspace}/${e.project}`));
+      const server = inv.projects.map((p) => ({ workspace: p.workspace, project: p.project, pages: p.pages, linked: p.linked, pathExists: p.pathExists, path: p.localPath }));
+      for (const o of inv.orphans || []) {
+        const [workspace, project] = String(o.key).split('/');
+        if (workspace && project && !known.has(o.key)) server.push({ workspace, project, path: o.path, pathExists: o.pathExists, linked: true });
+      }
+      if (server.length) pickEntries = server;
+    } catch (err) {
+      inventoryNote = err.message;
+    }
+  }
+
+  const searchBtn = el('button', {
+    class: 'btn btn-secondary btn-sm',
+    text: 'buscar projeto…',
+    title: 'Buscar projeto/workspace pelo nome ou pelo caminho, em todos os projetos do servidor',
+    onclick: async () => {
+      searchBtn.disabled = true;
+      searchBtn.textContent = 'carregando…';
+      await loadPickEntries();
+      searchBtn.disabled = false;
+      searchBtn.textContent = 'buscar projeto…';
+      projectPickerModal({
+        entries: pickEntries,
+        current: state.mode === 'pick' ? `${state.workspace}/${state.project}` : null,
+        onPick: (e) => {
+          state.mode = 'pick';
+          state.workspace = e.workspace;
+          state.project = e.project;
+          ensureScopeOption(e.workspace, e.project);
+          scopeSel.value = `${e.workspace}/${e.project}`;
+          syncEffective();
+          toast(`escopo: ${e.workspace}/${e.project}`);
+        },
+      });
+      if (inventoryNote) toast(`busca parcial: ${inventoryNote}`, 'err');
+    },
+  });
 
   const resolvedLabel = resolved?.workspace && resolved?.project
     ? `${resolved.workspace}/${resolved.project}`
@@ -1771,6 +1905,16 @@ VIEWS.maintenance = async (main) => {
     ...scopes.map((s) => el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}${s.path ? ` — ${s.path}` : ''}` })),
     el('option', { value: 'manual', text: 'digitar workspace/projeto…' }),
   );
+  // um projeto escolhido na busca pode não estar na lista do <select>: ele vira
+  // uma opção própria para o seletor não voltar sozinho para "automático"
+  function ensureScopeOption(workspace, project) {
+    const value = `${workspace}/${project}`;
+    if (scopeSel.querySelector(`option[value="${CSS.escape(value)}"]`)) return;
+    scopeSel.insertBefore(
+      el('option', { value, text: `${workspace} / ${project} (busca)` }),
+      scopeSel.lastElementChild,
+    );
+  }
   syncEffective();
 
   const ctxInfo = {
@@ -1824,11 +1968,12 @@ VIEWS.maintenance = async (main) => {
     el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px; align-items:center' },
       el('span', { class: 'small muted', text: 'escopo dos comandos por projeto:' }),
       scopeSel,
+      searchBtn,
       manualRow,
     ),
     el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px; align-items:center' },
       effectiveChip,
-      el('span', { class: 'small muted', text: scopes.length ? `${scopes.length} projeto(s) vinculado(s) no client-projects.json — ou digite outro` : 'nenhum projeto vinculado; use "digitar workspace/projeto" para apontar outro' }),
+      el('span', { class: 'small muted', text: scopes.length ? `${scopes.length} projeto(s) vinculado(s) no client-projects.json — a busca alcança todos os do servidor, ou digite outro` : 'nenhum projeto vinculado; use "buscar projeto" ou "digitar workspace/projeto" para apontar outro' }),
     ),
     el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
       el('span', { class: 'chip mono', text: catalog.runtime?.bin || 'ai-memory' }),
