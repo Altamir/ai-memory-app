@@ -1,23 +1,49 @@
 /* Tokens de UX do zzportal (coezzion) — ver .zcode/skills/zzportal-ui/resources/zzportal-tokens.md */
 :root {
-  --bg: #f4f5f7;
+  /* Cores e raios transcritos de @coezzion/tokens. Nenhum valor fora da
+     paleta: quando precisar de um tom mais forte, use o *-dark do mesmo
+     papel em vez de inventar um hex. */
+  --bg: #f5f5f5;
   --paper: #ffffff;
-  --ink: #2a2e36;
-  --muted: #6b7280;
+  --ink: #292a2c;
+  --muted: #515c6f;
   --text: #42464d;
-  --line: #e4e6ea;
-  --field: #d5d8de;
+  --line: #d6dae2;
+  --field: #78849e;
   --primary: #3859ff;
-  --primary-soft: #eef1ff;
-  --success: #1b7a45;
-  --success-soft: #e7f6ee;
-  --attention: #8a5a00;
-  --attention-soft: #fff4d6;
-  --danger: #c24132;
-  --danger-soft: #fdeeee;
+  --primary-dark: #273eb2;
+  --primary-soft: #ebf0ff;
+  --success: #238910;
+  --success-dark: #0e5600;
+  --success-soft: #e9ffe5;
+  --attention: #ad4e00;
+  --attention-soft: #fff1b8;
+  --danger: #c21114;
+  --danger-dark: #891012;
+  --danger-soft: #ffe5e5;
+
   --shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
-  --radius: 8px;
-  --radius-lg: 12px;
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-modal: 0 3px 10px rgba(0, 0, 0, 0.25);
+
+  --radius-sm: 4px;        /* $tn: botão e campo */
+  --radius: 8px;           /* $sm: card e conteúdo */
+  --radius-md: 16px;       /* $md */
+  --radius-lg: 24px;       /* $lg: modal */
+  --radius-pill: 500px;
+
+  /* Escala de espaço — $1=4px … $10=40px */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* Alturas de botão: sm 32px · md 40px */
+  --btn-h-sm: 32px;
+  --btn-h-md: 40px;
+
   --mono: 'SF Mono', Menlo, Consolas, monospace;
 }
 
@@ -124,25 +150,67 @@ html, body {
 .grid-cards { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
 .grid-metrics { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 
+/* Botão — $tn (4px) de raio, fonte $xxs (12px) peso 600, min-width 37px.
+   Alturas: sm 32px · md 40px. Sem tokens de estado: hover troca o *step*
+   do token e desabilitado fica texto $neutral-medium sobre $neutral-regular. */
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  border-radius: var(--radius);
-  padding: 8px 14px;
+  line-height: 1;
+  white-space: nowrap;
+  min-width: 37px;
+  min-height: var(--btn-h-md);
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
   background: transparent;
   color: var(--ink);
+  transition: background-color 0.12s ease-out, border-color 0.12s ease-out, color 0.12s ease-out;
 }
-.btn:disabled { opacity: 0.5; cursor: default; }
-.btn-primary { background: var(--primary); color: #fff; }
-.btn-primary:hover:not(:disabled) { background: #2c47d9; }
-.btn-secondary { background: #fff; border-color: var(--primary); color: var(--primary); }
-.btn-secondary:hover:not(:disabled) { background: var(--primary-soft); }
-.btn-danger { background: #fff; border-color: var(--danger); color: var(--danger); }
-.btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
-.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-sm { min-height: var(--btn-h-sm); padding: 0 10px; }
+.btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.btn:disabled {
+  color: var(--field);
+  background: var(--line);
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+/* primário: fundo $primary-medium, hover $primary-dark */
+.btn-primary { background: var(--primary); color: var(--paper); }
+.btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
+.btn-primary:disabled { background: var(--line); color: var(--field); }
+
+/* secundário: papel com borda e texto $primary-medium */
+.btn-secondary { background: var(--paper); border-color: var(--primary); color: var(--primary); }
+.btn-secondary:hover:not(:disabled) { border-color: var(--primary-dark); color: var(--primary-dark); }
+.btn-secondary:disabled { background: var(--paper); border-color: var(--field); color: var(--field); }
+
+/* Danger é uma propriedade, não uma variante: `.btn-danger` sozinho cai na
+   família secundária (borda e texto $error-regular) para não fazer a lista de
+   ações gritar em vermelho; `btn-primary btn-danger` é o botão sólido, para
+   quando a ação destrutiva é a principal daquela tela. */
+.btn-danger { background: var(--paper); border-color: var(--danger); color: var(--danger); }
+.btn-danger:hover:not(:disabled) { border-color: var(--danger-dark); color: var(--danger-dark); }
+.btn-danger.btn-primary { background: var(--danger); color: var(--paper); border-color: var(--danger); }
+.btn-danger.btn-primary:hover:not(:disabled) { background: var(--danger-dark); border-color: var(--danger-dark); }
+.btn-danger:disabled { background: var(--line); border-color: transparent; color: var(--field); }
+.btn-danger.btn-primary:disabled { background: var(--line); color: var(--field); }
+
+/* Botão de ícone (fechar, Ajuda "?"): quadrado, mesmo peso dos demais. */
+.btn-icon { padding: 0; width: var(--btn-h-sm); min-width: var(--btn-h-sm); }
+
+/* Miguinha de diretório: cabe num path longo sem esticar a linha. */
+.btn-crumb { min-height: 26px; padding: 0 var(--sp-2); }
 
 .chip {
   display: inline-block;
@@ -153,12 +221,22 @@ html, body {
   background: var(--bg);
   color: var(--muted);
 }
-.chip-ok { background: var(--success-soft); color: var(--success); }
+.chip-ok { background: var(--success-soft); color: var(--success-dark); }
 .chip-warn { background: var(--attention-soft); color: var(--attention); }
-.chip-err { background: var(--danger-soft); color: var(--danger); }
-.chip-info { background: var(--primary-soft); color: var(--primary); }
-.chip-btn { border: 0; font-family: inherit; cursor: pointer; }
+.chip-err { background: var(--danger-soft); color: var(--danger-dark); }
+.chip-info { background: var(--primary-soft); color: var(--primary-dark); }
+.chip-btn {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  transition: filter 0.12s ease-out;
+}
 .chip-btn:hover { filter: brightness(0.95); }
+.chip-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 .metric .metric-label {
   font-size: 10px;
@@ -185,7 +263,7 @@ label.field-label {
   font-family: inherit;
   font-size: 13px;
   color: var(--ink);
-  background: #fff;
+  background: var(--paper);
   border: 1px solid var(--field);
   border-radius: var(--radius);
   padding: 8px 12px;
@@ -277,7 +355,7 @@ textarea.field { resize: vertical; min-height: 70px; font-family: var(--mono); f
 /* terminais — janelas flutuantes, arrastáveis e redimensionáveis */
 #term-host { display: none; }
 .term-pane { height: 100%; width: 100%; }
-.term-pane .xterm { padding: 6px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius); }
+.term-pane .xterm { padding: 6px; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); }
 
 .term-window {
   position: fixed;
@@ -320,14 +398,18 @@ textarea.field { resize: vertical; min-height: 70px; font-family: var(--mono); f
 
 /* modal e toast */
 .modal-overlay {
-  position: fixed; inset: 0; background: rgba(42, 46, 54, 0.4);
-  display: flex; align-items: center; justify-content: center; z-index: 100;
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center; z-index: 9999;
+  animation: modal-fade 0.3s ease-out;
 }
 .modal {
-  background: var(--paper); border-radius: var(--radius-lg); box-shadow: var(--shadow);
+  background: var(--paper); border-radius: var(--radius-lg); box-shadow: var(--shadow-modal);
   width: min(640px, calc(100vw - 40px)); max-height: 80vh; display: flex; flex-direction: column;
-  padding: 18px; gap: 12px;
+  padding: 21px; gap: var(--sp-3);
+  animation: modal-in 0.3s ease-out;
 }
+@keyframes modal-in { from { opacity: 0; transform: scale(0.8); } to { opacity: 1; transform: none; } }
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
 .modal h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .modal-wide { width: min(980px, calc(100vw - 40px)); }
 .card.clickable { cursor: pointer; transition: border-color 0.12s ease-out; }
@@ -337,7 +419,7 @@ textarea.field { resize: vertical; min-height: 70px; font-family: var(--mono); f
 
 #toast-root { position: fixed; bottom: 16px; right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
 .toast {
-  background: var(--ink); color: #fff; font-size: 13px; font-weight: 500;
+  background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 500;
   border-radius: var(--radius); padding: 10px 16px; box-shadow: var(--shadow);
   animation: toast-in 0.15s ease-out;
 }

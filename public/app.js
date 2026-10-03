@@ -42,6 +42,42 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/**
+ * Botão do painel. Montar a classe na mão era o que produzia botões fora do
+ * padrão (padding sobrescrito, ordem de classes trocada, perigo sem variante).
+ * Aqui `kind` escolhe a família, `danger` é propriedade separada e `size` só
+ * tem dois valores — o resto da forma sai daqui.
+ *
+ *   btn({ text: 'Salvar', onClick: save })            → primário md
+ *   btn({ text: 'Encerrar', danger: true, onClick })  → secundário + perigo
+ *   btn({ text: 'Executar', kind: 'primary', danger: true, size: 'sm' })
+ *   btn({ text: '?', title: 'o que este comando faz', icon: true, onClick })
+ */
+function btn({
+  text, onClick, kind = 'secondary', danger = false, size = 'md',
+  icon = false, title, disabled = false, type, className = '', ...rest
+} = {}) {
+  const cls = ['btn', `btn-${kind}`];
+  if (danger) cls.push('btn-danger');
+  if (size === 'sm') cls.push('btn-sm');
+  if (icon) cls.push('btn-icon');
+  if (className) cls.push(className);
+  return el('button', {
+    class: cls.join(' '),
+    ...(text !== undefined ? { text } : {}),
+    ...(title ? { title } : {}),
+    ...(disabled ? { disabled: true } : {}),
+    ...(type ? { type } : {}),
+    ...(onClick ? { onclick: onClick } : {}),
+    ...rest,
+  });
+}
+
+/** Botão de ajuda: mesmo formato em toda tela, o title é quem explica. */
+function helpBtn(title, onClick) {
+  return btn({ text: '?', title, icon: true, size: 'sm', onClick });
+}
+
 /** Permite apenas <mark> em snippets vindos do servidor. */
 function safeSnippet(s) {
   if (!s) return '';
@@ -89,11 +125,12 @@ function modal({ title, bodyNode, actions = [], onClose, wide }) {
       continue;
     }
     actionsRow.append(
-      el('button', {
-        class: `btn btn-${a.kind || 'secondary'}`,
+      btn({
+        kind: a.kind || 'secondary',
+        danger: Boolean(a.danger),
         text: a.label,
         // sem onClick explícito, a ação padrão é fechar
-        onclick: () => (a.onClick ? a.onClick(close) : close()),
+        onClick: () => (a.onClick ? a.onClick(close) : close()),
       }),
     );
   }
@@ -120,12 +157,12 @@ function confirmModal({ title, message, word, danger, onConfirm }) {
   let confirmBtn;
   if (word) {
     const input = el('input', { class: 'field', placeholder: `digite "${word}" para confirmar`, autocomplete: 'off' });
-    confirmBtn = el('button', { class: `btn btn-${danger ? 'danger' : 'primary'}`, text: 'Confirmar', disabled: true });
+    confirmBtn = btn({ kind: 'primary', danger, text: 'Confirmar', disabled: true });
     input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim() !== word; });
     body.append(input);
     setTimeout(() => input.focus(), 50);
   } else {
-    confirmBtn = el('button', { class: `btn btn-${danger ? 'danger' : 'primary'}`, text: 'Confirmar' });
+    confirmBtn = btn({ kind: 'primary', danger, text: 'Confirmar' });
   }
   confirmBtn.addEventListener('click', () => { close(); onConfirm(); });
   const close = modal({
@@ -311,7 +348,7 @@ async function renderStepCli(setup) {
   const card = el('div', { class: 'card stack', style: 'gap:8px' });
   const releaseOut = el('div', { class: 'small muted' });
   const installOut = el('div', { class: 'small muted' });
-  const installBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Instalar a CLI' });
+  const installBtn = btn({ size: 'sm', text: 'Instalar a CLI' });
   let release = null;
 
   const showRelease = async () => {
@@ -378,9 +415,9 @@ async function renderStepCli(setup) {
   // realinhar sem instalar nada
   const elsewhereRow = () => {
     if (!setup.cli.foundElsewhere) return null;
-    const btn = el('button', { class: 'btn btn-secondary btn-sm', text: 'usar este caminho' });
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
+    const useBtn = btn({ text: 'Usar este caminho', size: 'sm' });
+    useBtn.addEventListener('click', async () => {
+      useBtn.disabled = true;
       try {
         await api('/api/setup/use-cli', { method: 'POST', body: { path: setup.cli.foundElsewhere } });
         toast('caminho da CLI atualizado', 'ok');
@@ -389,7 +426,7 @@ async function renderStepCli(setup) {
       } catch (err) {
         aimLog('install-cli: usar-caminho-alternativo falhou', err);
         toast(err.message, 'err');
-        btn.disabled = false;
+        useBtn.disabled = false;
       }
     });
     return el('div', { class: 'row', style: 'gap:6px; align-items:center' },
@@ -414,7 +451,7 @@ async function renderStepCli(setup) {
     el('div', { class: 'small muted', text: 'Passo 1 de 2 — a CLI do ai-memory. Sem ela, manutenção e sessões run não funcionam; a leitura de memórias pelo servidor não é afetada.' }),
     card,
     el('div', { class: 'row', style: 'justify-content:flex-end' },
-      el('button', { class: 'btn btn-secondary btn-sm', text: 'configurar servidor primeiro', onclick: () => openSetupWizard('server') }),
+      btn({ text: 'Configurar servidor primeiro', size: 'sm', onClick: () => openSetupWizard('server') }),
     ),
   );
 
@@ -459,7 +496,7 @@ async function renderStepServer(setup) {
     radio('remote', 'Servidor remoto', 'em outra máquina, com URL + token'),
   );
 
-  const probeBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Testar conexão' });
+  const probeBtn = btn({ size: 'sm', text: 'Testar conexão' });
   probeBtn.addEventListener('click', async () => {
     if (!urlIn.value.trim()) return toast('informe a URL', 'err');
     probeBtn.disabled = true;
@@ -479,7 +516,7 @@ async function renderStepServer(setup) {
     }
   });
 
-  const saveBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Salvar e conectar' });
+  const saveBtn = btn({ size: 'sm', text: 'Salvar e conectar' });
   saveBtn.addEventListener('click', async () => {
     if (!urlIn.value.trim()) return toast('informe a URL do servidor', 'err');
     saveBtn.disabled = true;
@@ -525,7 +562,7 @@ async function renderStepServer(setup) {
       : 'Configuração do servidor (a CLI ainda não está instalada — dá para voltar nela depois pelo chip.' }),
     card,
     setup.cli.ok ? null : el('div', { class: 'row', style: 'justify-content:flex-end' },
-      el('button', { class: 'btn btn-secondary btn-sm', text: 'voltar para a CLI', onclick: () => openSetupWizard('cli') }),
+      btn({ text: 'voltar para a CLI', size: 'sm', onClick: () => openSetupWizard('cli') }),
     ),
   );
 
@@ -551,7 +588,7 @@ async function renderStepDone(setup) {
       el('div', { class: 'small muted', text: 'Para trocar de servidor depois, use o chip no topo. Para apontar o MCP dos harnesses para este servidor, o gestor de servidores tem a seção "MCP dos harnesses".' }),
     ),
     el('div', { class: 'row', style: 'justify-content:flex-end' },
-      el('button', { class: 'btn btn-secondary btn-sm', text: 'abrir gestão de servidores', onclick: () => { closeFn?.(); openServerManager(); } }),
+      btn({ text: 'abrir gestão de servidores', size: 'sm', onClick: () => { closeFn?.(); openServerManager(); } }),
     ),
   );
   // formato objeto do modal(): sem onClick, o botão fecha sozinho — nós crus
@@ -658,10 +695,7 @@ async function openServerManager() {
         el('div', { class: 'row', style: 'gap:6px' },
           isActive
             ? el('span', { class: 'small muted', text: 'conectado' })
-            : el('button', {
-                class: 'btn btn-primary btn-sm',
-                text: 'conectar',
-                onclick: async () => {
+            : btn({ kind: 'primary', size: 'sm', text: 'Conectar', onClick: async () => {
                   try {
                     data = await api('/api/servers/activate', { method: 'POST', body: { id: s.id } });
                     toast(`conectado em ${s.name}`, 'ok');
@@ -671,21 +705,9 @@ async function openServerManager() {
                   } catch (err) {
                     toast(err.message, 'err');
                   }
-                },
-              }),
-          s.env ? null : el('button', {
-            class: 'btn btn-secondary btn-sm',
-            text: 'editar',
-            onclick: () => fillForm(s),
-          }),
-          el('button', {
-            class: 'btn btn-secondary btn-sm',
-            text: 'remover',
-            title: s.env
-              ? 'Some da lista; o ambiente continua como destino implícito do painel'
-              : 'Remove este servidor do painel',
-            onclick: remove,
-          }),
+                } }),
+          s.env ? null : btn({ kind: 'secondary', size: 'sm', text: 'Editar', onClick: () => fillForm(s) }),
+          btn({ kind: 'secondary', size: 'sm', text: 'Remover', onClick: remove }),
         ),
       );
     });
@@ -704,10 +726,7 @@ async function openServerManager() {
           el('span', { class: 'small muted mono', text: data.active.url }),
           el('span', { class: 'small muted', text: 'O painel continua conectado aqui: é o destino implícito das variáveis de ambiente.' }),
         ),
-        el('button', {
-          class: 'btn btn-secondary btn-sm',
-          text: 'mostrar na lista',
-          onclick: async () => {
+        btn({ size: 'sm', text: 'Mostrar na lista', onClick: async () => {
             try {
               data = await api('/api/servers/env', { method: 'POST' });
               toast('servidor do ambiente restaurado', 'ok');
@@ -715,8 +734,7 @@ async function openServerManager() {
             } catch (err) {
               toast(err.message, 'err');
             }
-          },
-        }),
+          } }),
       ));
     }
     listBox.replaceChildren(...rows);
@@ -770,9 +788,9 @@ async function openServerManager() {
   const clearTokenLabel = el('label', { class: 'check', style: 'gap:4px' }, clearTokenCheck, 'limpar token gravado');
   const probeOut = el('div', { class: 'small muted' });
 
-  const saveBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Adicionar' });
-  const probeBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Testar conexão' });
-  const resetBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Limpar' });
+  const saveBtn = btn({ size: 'sm', text: 'Adicionar' });
+  const probeBtn = btn({ size: 'sm', text: 'Testar conexão' });
+  const resetBtn = btn({ size: 'sm', text: 'Limpar' });
 
   function renderForm() {
     saveBtn.textContent = form.id ? 'Salvar' : 'Adicionar';
@@ -837,7 +855,7 @@ async function openServerManager() {
 
   resetBtn.addEventListener('click', clearForm);
 
-  const cancelBtn = el('button', { class: 'btn btn-secondary', text: 'Fechar' });
+  const cancelBtn = btn({ text: 'Fechar' });
   const harnessBox = el('div', { class: 'stack', id: 'harness-mcp-box' });
   const close = modal({
     title: 'Servidores do ai-memory',
@@ -874,7 +892,7 @@ async function renderHarnesses(box) {
   const statusLine = el('div', { class: 'small muted' });
   const listBox = el('div', { class: 'stack', style: 'gap:6px' });
 
-  const applyBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Aplicar selecionados', disabled: true });
+  const applyBtn = btn({ size: 'sm', text: 'Aplicar selecionados', disabled: true });
   applyBtn.addEventListener('click', async () => {
     const ids = [...selected];
     if (!ids.length) return;
@@ -925,11 +943,7 @@ async function renderHarnesses(box) {
       // hooks: o que captura o trabalho e vincula o projeto no primeiro capture
       let hooksBtn = null;
       if (h.hooksSupported) {
-        hooksBtn = el('button', {
-          class: 'btn btn-secondary btn-sm',
-          text: 'hooks',
-          title: `install-hooks --agent ${h.id} --apply — captura prompts/ferramentas/sessões e vincula o projeto (idempotente, com backup)`,
-          onclick: async () => {
+        hooksBtn = btn({ kind: 'secondary', size: 'sm', text: 'Hooks', onClick: async () => {
             hooksBtn.disabled = true;
             hooksBtn.textContent = '…';
             try {
@@ -942,8 +956,7 @@ async function renderHarnesses(box) {
                   if (!j || j.status === 'running') return;
                   clearInterval(t);
                   resolve(j);
-                }, 1000);
-              });
+                }, 1000); });
               if (fim.status === 'ok') {
                 hooksBtn.textContent = 'hooks ✓';
                 toast(`hooks do ${h.label} instalados`, 'ok');
@@ -1014,7 +1027,7 @@ VIEWS.dashboard = async (main) => {
         el('div', { class: 'card stack', style: 'gap:8px' },
           el('div', { class: 'row-between' },
             el('strong', { text: 'Falta preparar o painel' }),
-            el('button', { class: 'btn btn-primary btn-sm', text: 'Preparar agora', onclick: () => openSetupWizard() }),
+            btn({ size: 'sm', text: 'Preparar agora', onClick: () => openSetupWizard() }),
           ),
           el('ul', { class: 'small muted', style: 'margin:0; padding-left:18px' },
             faltas.map((f) => el('li', { text: f })),
@@ -1033,7 +1046,7 @@ VIEWS.dashboard = async (main) => {
         el('div', { class: 'card' },
           el('div', { class: 'row-between' },
             el('strong', { text: 'Servidor ai-memory inacessível' }),
-            el('button', { class: 'btn btn-secondary btn-sm', text: 'Tentar de novo', onclick: load }),
+            btn({ text: 'Tentar de novo', size: 'sm', onClick: load }),
           ),
           el('p', { class: 'small muted', text: err.message }),
           el('p', { class: 'small muted', text: `Verifique o container (docker ps) e a URL ${ACTIVE_SERVER?.url || 'configurada no painel'}.` }),
@@ -1065,7 +1078,7 @@ VIEWS.dashboard = async (main) => {
         el('span', { class: 'muted', text: 'Binário' }),
         setup.cli.ok
           ? el('span', { class: 'mono', style: 'text-align:right; word-break:break-all', text: `${setup.cli.path}${setup.cli.version ? ` · v${setup.cli.version}` : ''}` })
-          : el('button', { class: 'chip chip-btn chip-warn', text: 'não instalada — preparar', onclick: () => openSetupWizard() }),
+          : el('button', { class: 'chip chip-btn chip-warn', text: 'Não instalada — preparar', onclick: () => openSetupWizard() }),
       ),
       el('div', { class: 'row-between small' },
         el('span', { class: 'muted', text: 'Data-dir do cliente' }),
@@ -1092,7 +1105,7 @@ VIEWS.dashboard = async (main) => {
       (setup.paths.storeDirWiki && setup.paths.storeDirDb)
         ? el('div', { class: 'row-between small' },
             el('span', { class: 'muted', text: 'Exportação' }),
-            el('button', { class: 'btn btn-secondary btn-sm', text: 'Exportar memórias', onclick: () => { location.hash = 'export'; } }),
+            btn({ text: 'Exportar memórias', size: 'sm', onClick: () => { location.hash = 'export'; } }),
           )
         : null,
     ] : [el('div', { class: 'small muted', text: 'diagnóstico indisponível' })];
@@ -1105,7 +1118,7 @@ VIEWS.dashboard = async (main) => {
             ? el('button', { class: 'chip chip-btn', text: `servidor: ${ACTIVE_SERVER.name}`, title: 'Trocar de servidor', onclick: () => { openServerManager(); } })
             : null,
         ),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'Atualizar', onclick: load }),
+        btn({ text: 'Atualizar', size: 'sm', onClick: load }),
       ),
       el('div', { class: 'grid grid-metrics' },
         metric('Páginas', c.pages_latest ?? '—', `${c.pages_all ?? '—'} versões`),
@@ -1170,8 +1183,8 @@ VIEWS.logs = async (main) => {
     el('option', { value: '5000', text: 'últimas 5000' }),
   );
   const filterIn = el('input', { class: 'field', style: 'max-width:220px', placeholder: 'filtrar linhas…', autocomplete: 'off' });
-  const liveBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Ao vivo' });
-  const reloadBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Atualizar', onclick: () => loadContent() });
+  const liveBtn = btn({ size: 'sm', text: 'Ao vivo' });
+  const reloadBtn = btn({ text: 'Atualizar', size: 'sm', onClick: () => loadContent() });
   const note = el('div', { class: 'small muted' });
   const logPanel = el('div', { class: 'log-panel', style: 'height:min(60vh, 640px)' }, el('div', { class: 'empty', text: 'carregando logs…' }));
 
@@ -1463,7 +1476,7 @@ async function refreshHistory(container, panel, statusChip) {
       el('td', { class: 'mono', text: j.command }),
       el('td', {}, el('span', { class: `chip ${j.status === 'ok' ? 'chip-ok' : j.status === 'running' ? 'chip-info' : j.status === 'timeout' ? 'chip-warn' : 'chip-err'}`, text: j.status })),
       el('td', { text: fmtDuration(j.durationMs) }),
-      el('td', {}, el('button', { class: 'btn btn-secondary btn-sm', text: 'ver log', onclick: async () => {
+      el('td', {}, btn({ text: 'Ver log', size: 'sm', onClick: async () => {
         // o painel só é revelado dentro do showJob: rolar antes não faria nada
         await showJob(j.id, panel, statusChip);
         panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1534,7 +1547,7 @@ async function commandHelp(cmd, ctxInfo) {
 /** Modal de confirmação digitada, mostrando a linha de comando e os efeitos. */
 function confirmRunModal(cmd, preview, scopeLabel, onConfirm) {
   const input = el('input', { class: 'field', placeholder: `digite "${preview.confirmWord}" para confirmar`, autocomplete: 'off' });
-  const confirmBtn = el('button', { class: 'btn btn-danger', text: 'Confirmar', disabled: true });
+  const confirmBtn = btn({ kind: 'primary', danger: true, text: 'Confirmar', disabled: true });
   input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim() !== preview.confirmWord; });
   confirmBtn.addEventListener('click', () => { close(); onConfirm(); });
   const close = modal({
@@ -1644,17 +1657,19 @@ function commandCard(cmd, ctxInfo) {
     el('div', { class: 'row-between' },
       el('strong', { text: cmd.label }),
       el('div', { class: 'row', style: 'gap:4px' }, scopeLabel,
-        el('button', { class: 'btn btn-secondary btn-sm', text: '?', title: 'o que este comando faz, o que ele toca e a linha de comando', onclick: () => commandHelp(cmd, { ...ctxInfo, getOptions, advancedEls }) }),
+        helpBtn('o que este comando faz, o que ele toca e a linha de comando', () => commandHelp(cmd, { ...ctxInfo, getOptions, advancedEls })),
       ),
     ),
     el('div', { class: 'small muted mono', text: cmd.id }),
     el('div', { class: 'small muted', text: cmd.summary }),
     el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, ...effectChips(cmd)),
     basicEls.length ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px; align-items:flex-end' }, basicEls) : null,
-    el('div', {}, el('button', {
-      class: `btn ${cmd.group === 'danger' ? 'btn-danger' : 'btn-primary'} btn-sm`,
+    el('div', {}, btn({
+      danger: cmd.group === 'danger',
+      kind: 'primary',
+      size: 'sm',
       text: 'Executar',
-      onclick: () => runCommand(cmd, { ...ctxInfo, getOptions }),
+      onClick: () => runCommand(cmd, { ...ctxInfo, getOptions }),
     })),
   );
   return card;
@@ -1668,6 +1683,7 @@ function commandCard(cmd, ctxInfo) {
 // workspace/projeto pelo nome ou pelo caminho local.
 
 const normText = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
 /**
  * Entradas de projeto para a busca: o que o SERVIDOR tem (admin/projects)
  * cruzado com os vínculos desta máquina. `localScopes` é o retorno de
@@ -1722,12 +1738,13 @@ function ensureSelectOption(sel, value, text, before) {
   return true;
 }
 
-
 /**
  * Modal com filtro por workspace, projeto ou caminho. `entries` são
- * { workspace, project, path, pages, linked, pathExists }.
+ * { workspace, project, path, pages, linked, pathExists }. `emptyHint` troca a
+ * mensagem de "nada encontrado" — cada tela oferece um caminho de saída
+ * diferente quando o filtro não acha nada.
  */
-function projectPickerModal({ entries, current, onPick }) {
+function projectPickerModal({ entries, current, onPick, emptyHint }) {
   let closeFn = null;
   const search = el('input', { class: 'field', placeholder: 'filtrar por workspace, projeto ou caminho…', autocomplete: 'off' });
   const list = el('div', { class: 'stack', style: 'gap:6px; max-height:420px; overflow-y:auto' });
@@ -1754,7 +1771,7 @@ function projectPickerModal({ entries, current, onPick }) {
       list.replaceChildren(el('div', {
         class: 'empty',
         text: entries.length
-          ? 'nenhum projeto bate com o filtro — feche e use "digitar workspace/projeto" para apontar na mão'
+          ? (emptyHint || 'nenhum projeto bate com o filtro')
           : 'nenhum projeto conhecido: o servidor não respondeu e nada está vinculado nesta máquina',
       }));
       return;
@@ -1840,7 +1857,7 @@ VIEWS.maintenance = async (main) => {
     { class: 'card stack', style: 'display:none' },
     el('div', { class: 'row-between' },
       el('div', { class: 'row' }, el('strong', { text: 'Execução' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
-      el('div', { class: 'row' }, statusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); panel.style.display = 'none'; } })),
+      el('div', { class: 'row' }, statusChip, btn({ text: 'Fechar', size: 'sm', onClick: () => { stopLogStream(); panel.style.display = 'none'; } })),
     ),
     el('div', { class: 'log-panel' }),
   );
@@ -1858,27 +1875,7 @@ VIEWS.maintenance = async (main) => {
   let pickEntries = scopes.map((s) => ({ workspace: s.workspace, project: s.project, path: s.path || null }));
   let inventoryNote = null;
 
-  async function loadPickEntries() {
-    try {
-      const inv = await api('/api/server-scopes');
-      if (!inv?.ok) { inventoryNote = inv?.error || 'servidor não respondeu'; return; }
-      const known = new Set(pickEntries.map((e) => `${e.workspace}/${e.project}`));
-      const server = inv.projects.map((p) => ({ workspace: p.workspace, project: p.project, pages: p.pages, linked: p.linked, pathExists: p.pathExists, path: p.localPath }));
-      for (const o of inv.orphans || []) {
-        const [workspace, project] = String(o.key).split('/');
-        if (workspace && project && !known.has(o.key)) server.push({ workspace, project, path: o.path, pathExists: o.pathExists, linked: true });
-      }
-      if (server.length) pickEntries = server;
-    } catch (err) {
-      inventoryNote = err.message;
-    }
-  }
-
-  const searchBtn = el('button', {
-    class: 'btn btn-secondary btn-sm',
-    text: 'buscar projeto…',
-    title: 'Buscar projeto/workspace pelo nome ou pelo caminho, em todos os projetos do servidor',
-    onclick: async () => {
+  const searchBtn = btn({ kind: 'secondary', size: 'sm', text: 'Buscar projeto…', title: 'Buscar projeto/workspace pelo nome ou pelo caminho, em todos os projetos do servidor', onClick: async () => {
       searchBtn.disabled = true;
       searchBtn.textContent = 'carregando…';
       // recarrega a cada clique: entre uma busca e outra a máquina pode ter
@@ -1891,16 +1888,18 @@ VIEWS.maintenance = async (main) => {
       projectPickerModal({
         entries: pickEntries,
         current: state.mode === 'pick' ? `${state.workspace}/${state.project}` : null,
+        emptyHint: 'nenhum projeto bate com o filtro — feche e use "digitar workspace/projeto" para apontar na mão',
         onPick: (e) => {
           state.mode = 'pick';
           state.workspace = e.workspace;
           state.project = e.project;
-          ensureScopeOption(e.workspace, e.project);
+          // um projeto escolhido na busca pode não estar na lista do <select>:
+          // ele vira opção própria para o seletor não voltar para "automático"
+          ensureSelectOption(scopeSel, `${e.workspace}/${e.project}`, `${e.workspace} / ${e.project} (busca)`, scopeSel.lastElementChild);
           scopeSel.value = `${e.workspace}/${e.project}`;
           syncEffective();
           toast(`escopo: ${e.workspace}/${e.project}`);
-        },
-      });
+        } });
       if (inventoryNote) toast(`busca parcial: ${inventoryNote}`, 'err');
     },
   });
@@ -1963,16 +1962,6 @@ VIEWS.maintenance = async (main) => {
     ...scopes.map((s) => el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}${s.path ? ` — ${s.path}` : ''}` })),
     el('option', { value: 'manual', text: 'digitar workspace/projeto…' }),
   );
-  // um projeto escolhido na busca pode não estar na lista do <select>: ele vira
-  // uma opção própria para o seletor não voltar sozinho para "automático"
-  function ensureScopeOption(workspace, project) {
-    const value = `${workspace}/${project}`;
-    if (scopeSel.querySelector(`option[value="${CSS.escape(value)}"]`)) return;
-    scopeSel.insertBefore(
-      el('option', { value, text: `${workspace} / ${project} (busca)` }),
-      scopeSel.lastElementChild,
-    );
-  }
   syncEffective();
 
   const ctxInfo = {
@@ -1993,10 +1982,7 @@ VIEWS.maintenance = async (main) => {
   const header = el('div', { class: 'card stack' },
     el('div', { class: 'row-between' },
       el('strong', { text: 'Como esta tela executa' }),
-      el('button', {
-        class: 'btn btn-secondary btn-sm',
-        text: '? entender a manutenção',
-        onclick: () => modal({
+      helpBtn('como a manutenção funciona, o que cada comando toca e a linha executada', () => modal({
           title: 'Manutenção do ai-memory — como funciona',
           wide: true,
           bodyNode: el('div', { class: 'stack' },
@@ -2018,9 +2004,7 @@ VIEWS.maintenance = async (main) => {
               el('div', { class: 'small', text: 'Os botões destrutivos exigem digitar o nome do comando e mostram a linha exata antes. Um Backup antes de purge/reset/reindex é sempre uma boa ideia.' }),
             ),
           ),
-          actions: [{ label: 'Fechar' }],
-        }),
-      }),
+          actions: [{ label: 'Fechar' }] })),
     ),
     el('div', { class: 'small muted', text: 'Os comandos por projeto usam o escopo escolhido abaixo. Os globais ignoram o seletor e avisam no próprio card.' }),
     el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px; align-items:center' },
@@ -2047,7 +2031,7 @@ VIEWS.maintenance = async (main) => {
   const historyCard = el('div', { class: 'card stack', 'data-history': '1' },
     el('div', { class: 'row-between' },
       el('strong', { text: 'Execuções recentes' }),
-      el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => refreshHistory(root, panel, statusChip) }),
+      btn({ text: 'Atualizar', size: 'sm', onClick: () => refreshHistory(root, panel, statusChip) }),
     ),
     el('table', { class: 'table' }),
   );
@@ -2094,7 +2078,7 @@ VIEWS.pending = async (main) => {
       wrap.replaceChildren(
         el('div', { class: 'view-head' },
           el('strong', { text: 'Propostas de escrita aguardando revisão' }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Atualizar', onclick: load }),
+          btn({ text: 'Atualizar', size: 'sm', onClick: load }),
         ),
         el('div', { class: 'card empty', text: 'Nenhuma pendência — o auto-improve ainda não propôs nada (ou já foi revisado).' }),
       );
@@ -2111,18 +2095,18 @@ VIEWS.pending = async (main) => {
         ),
         el('div', { class: 'row', style: 'flex-wrap:wrap' }, meta),
         el('div', { class: 'row' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver diff', onclick: async () => {
+          btn({ text: 'Ver diff', size: 'sm', onClick: async () => {
             try {
               const d = await api(`/api/pending/${encodeURIComponent(id)}/diff`);
               modal({ title: `Diff · ${String(id).slice(0, 12)}`, bodyNode: renderJsonPretty(d), actions: [{ label: 'Fechar' }] });
             } catch (err) { toast(err.message, 'err'); }
           } }),
-          el('button', { class: 'btn btn-primary btn-sm', text: 'aprovar', onclick: () => {
+          btn({ kind: 'primary', size: 'sm', text: 'Aprovar', onClick: () => {
             api(`/api/pending/${encodeURIComponent(id)}/approve`, { method: 'POST', body: {} })
               .then(() => { toast('proposta aprovada', 'ok'); load(); })
               .catch((err) => toast(err.message, 'err'));
           } }),
-          el('button', { class: 'btn btn-danger btn-sm', text: 'rejeitar', onclick: () => {
+          btn({ text: 'Rejeitar', danger: true, size: 'sm', onClick: () => {
             const reason = el('textarea', { class: 'field', placeholder: 'motivo da rejeição (opcional)' });
             modal({
               title: `Rejeitar ${String(id).slice(0, 12)}?`,
@@ -2135,8 +2119,7 @@ VIEWS.pending = async (main) => {
                     .then(() => { toast('proposta rejeitada'); load(); })
                     .catch((err) => toast(err.message, 'err'));
                 } },
-              ],
-            });
+              ] });
           } }),
         ),
       );
@@ -2144,7 +2127,7 @@ VIEWS.pending = async (main) => {
     wrap.replaceChildren(
       el('div', { class: 'view-head' },
         el('strong', { text: `${items.length} proposta(s) aguardando revisão` }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'Atualizar', onclick: load }),
+        btn({ text: 'Atualizar', size: 'sm', onClick: load }),
       ),
       ...cards,
     );
@@ -2188,7 +2171,7 @@ VIEWS.mail = async (main) => {
       return;
     }
     const items = data.items || [];
-    const sendBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Enviar mensagem…', onclick: () => openComposer(refreshCurrent) });
+    const sendBtn = btn({ size: 'sm', text: 'Enviar mensagem…', onClick: () => openComposer(refreshCurrent) });
     const header = el('div', { class: 'view-head' },
       el('strong', { text: `${items.length} handoff(s) aberto(s)` }),
       sendBtn,
@@ -2213,7 +2196,7 @@ VIEWS.mail = async (main) => {
         ].filter(Boolean)),
         steps.length ? el('div', { class: 'small' }, el('div', { class: 'muted', text: 'Próximos passos:' }), el('ul', { style: 'margin:4px 0' }, steps.slice(0, 5).map((s) => el('li', { text: String(s).slice(0, 200) })))) : null,
         files.length ? el('div', { class: 'row', style: 'flex-wrap:wrap' }, files.slice(0, 6).map((f) => el('span', { class: 'chip mono', text: String(f).slice(0, 48) }))) : null,
-        el('div', {}, el('button', { class: 'btn btn-primary btn-sm', text: 'Aceitar (consome o handoff)', onclick: () => {
+        el('div', {}, btn({ kind: 'primary', size: 'sm', text: 'Aceitar (consome o handoff)', onClick: () => {
           confirmModal({
             title: 'Aceitar handoff',
             message: 'Handoffs são single-use: aceitar consome o registro e o marca como aceito. Continuar?',
@@ -2223,8 +2206,7 @@ VIEWS.mail = async (main) => {
                 .then((accepted) => {
                   toast('handoff aceito', 'ok');
                   modal({ title: 'Handoff aceito', bodyNode: renderJsonPretty(accepted), actions: [{ label: 'Fechar' }] });
-                  loadHandoffs();
-                })
+                  loadHandoffs(); })
                 .catch((err) => toast(err.message, 'err'));
             },
           });
@@ -2248,7 +2230,7 @@ VIEWS.mail = async (main) => {
     }
     const items = data.items || [];
     const parts = [];
-    const sendBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Enviar mensagem…', onclick: () => openComposer(refreshCurrent) });
+    const sendBtn = btn({ size: 'sm', text: 'Enviar mensagem…', onClick: () => openComposer(refreshCurrent) });
     parts.push(el('div', { class: 'view-head' },
       el('strong', { text: `Caixa de ${box === 'outbox' ? 'saída' : 'entrada'} · ${items.length} mensagem(ns)` }),
       sendBtn,
@@ -2271,7 +2253,7 @@ VIEWS.mail = async (main) => {
         el('td', { class: 'small muted', text: timeAgo(it.created_at) }),
         el('td', {},
           box === 'inbox'
-            ? el('button', { class: 'btn btn-secondary btn-sm', text: 'ler', onclick: () => {
+            ? btn({ text: 'Ler', size: 'sm', onClick: () => {
                 confirmModal({
                   title: 'Ler mensagem',
                   message: 'Ler (pop) consome a mensagem: ela sai da fila e só pode ser lida uma vez. Continuar?',
@@ -2290,7 +2272,7 @@ VIEWS.mail = async (main) => {
                   },
                 });
               } })
-            : el('button', { class: 'btn btn-danger btn-sm', text: 'cancelar', onclick: () => {
+            : btn({ text: 'Cancelar', danger: true, size: 'sm', onClick: () => {
                 api('/api/messages/cancel', { method: 'POST', body: { messageId: id } })
                   .then(() => { toast('mensagem cancelada'); loadMessages('outbox'); })
                   .catch((err) => toast(err.message, 'err'));
@@ -2362,7 +2344,7 @@ function scopeChooser() {
   const projFree = el('input', { class: 'field', placeholder: 'projeto (ex.: refinamento-engine)', autocomplete: 'off' });
   const selBox = el('div', { class: 'row', style: 'flex-wrap:wrap' }, wsSel, projSel);
   const freeBox = el('div', { class: 'stack', style: 'display:none' }, wsFree, projFree);
-  const toggle = el('button', { class: 'btn btn-secondary btn-sm', type: 'button', text: 'digitar manualmente' });
+  const toggle = btn({ size: 'sm', text: 'Digitar manualmente', type: 'button' });
   let free = false;
   let scopes = [];
 
@@ -2455,8 +2437,10 @@ function openDirPicker(onPick) {
   const listEl = el('div', { class: 'stack', style: 'gap:4px; max-height:300px; overflow-y:auto; padding-right:4px' });
   const footerPath = el('span', { class: 'mono small', text: '' });
 
+  // botão de miguinha: mesma receita do resto, só menor. Era `style` inline
+  // porque o padding default do btn-sm é grande demais para um item de path.
   const crumbBtn = (label, target) =>
-    el('button', { class: 'btn btn-secondary btn-sm', style: 'padding:2px 8px', text: label, onclick: () => load(target) });
+    btn({ text: label, size: 'sm', className: 'btn-crumb', onClick: () => load(target) });
 
   function renderBread(data) {
     bread.replaceChildren();
@@ -2535,7 +2519,7 @@ let winCascade = 0;
 
 function buildTermWindow(session, t) {
   const titleEl = el('span', { class: 'term-window-title', text: `${session.harness} · ${session.cwd}` });
-  const closeBtn = el('button', { class: 'btn btn-secondary btn-sm', text: '×', title: 'Fechar (a sessão continua rodando)' });
+  const closeBtn = btn({ icon: true, size: 'sm', text: '×', title: 'Fechar (a sessão continua rodando)' });
   const head = el('div', { class: 'term-window-head' },
     el('div', { class: 'row', style: 'flex:1; min-width:0' }, titleEl),
     el('div', { class: 'term-window-actions' }, closeBtn),
@@ -2663,12 +2647,7 @@ VIEWS.sessions = async (main) => {
   const harnessSel = el('select', { class: 'field', style: 'max-width:170px' },
     HARNESS_OPTIONS.map((h) => el('option', { value: h, text: h })));
   const cwdInput = el('input', { class: 'field', list: 'dir-suggestions', placeholder: 'escolha um projeto conhecido ou clique em Procurar…', autocomplete: 'off' });
-  const browseBtn = el('button', {
-    class: 'btn btn-secondary',
-    text: 'Procurar…',
-    title: 'Navegar pelas pastas e escolher',
-    onclick: () => openDirPicker((chosen) => { cwdInput.value = chosen; }),
-  });
+  const browseBtn = btn({ kind: 'secondary', text: 'Procurar…', title: 'Navegar pelas pastas e escolher', onClick: () => openDirPicker((chosen) => { cwdInput.value = chosen; }) });
   const wsMode = el('select', { class: 'field', style: 'max-width:170px' },
     el('option', { value: 'none', text: 'sem workstream' }),
     el('option', { value: 'new', text: 'nova workstream' }),
@@ -2766,14 +2745,15 @@ VIEWS.sessions = async (main) => {
             s.lostIo ? el('div', { class: 'small', style: 'color: var(--attention)', text: s.endedNote || 'perdida na reinicialização do painel' }) : null,
           ),
           el('div', { class: 'row', onclick: (e) => e.stopPropagation() },
-            !s.lostIo ? el('button', { class: 'btn btn-primary btn-sm', text: 'Terminal', onclick: () => openTermWindow(s, onStatus) }) : null,
-            running ? el('button', { class: 'btn btn-danger btn-sm', text: 'Encerrar', onclick: () => killSession(s.id) }) : null,
-            !running && terms.has(s.id) ? el('button', { class: 'btn btn-secondary btn-sm', text: 'descartar terminal', onclick: () => { closeTerm(s.id); refreshList().catch(() => {}); } }) : null,
-            !running ? el('button', {
-              class: 'btn btn-danger btn-sm',
-              text: 'excluir',
+            !s.lostIo ? btn({ size: 'sm', text: 'Terminal', onClick: () => openTermWindow(s, onStatus) }) : null,
+            running ? btn({ text: 'Encerrar', danger: true, size: 'sm', onClick: () => killSession(s.id) }) : null,
+            !running && terms.has(s.id) ? btn({ text: 'Descartar terminal', size: 'sm', onClick: () => { closeTerm(s.id); refreshList().catch(() => {}); } }) : null,
+            !running ? btn({
+              text: 'Excluir',
+              danger: true,
+              size: 'sm',
               title: 'Remove o card da lista do painel — não apaga nada no ai-memory',
-              onclick: () => removeSession(s.id),
+              onClick: () => removeSession(s.id),
             }) : null,
           ),
         ),
@@ -2781,7 +2761,7 @@ VIEWS.sessions = async (main) => {
     }
   }
 
-  const startBtn = el('button', { class: 'btn btn-primary', text: 'Iniciar sessão' });
+  const startBtn = btn({ kind: 'primary', text: 'Iniciar sessão' });
   startBtn.addEventListener('click', () => {
     const cwd = cwdInput.value.trim();
     if (!cwd) { toast('escolha o diretório do projeto', 'err'); return; }
@@ -2825,11 +2805,10 @@ VIEWS.sessions = async (main) => {
             el('td', { class: 'row', style: 'gap:6px' }, p.protected ? [
               el('span', { class: 'chip', title: 'pid em .protected-pids.json — o painel não oferece ações para ele', text: '🔒 protegido' }),
             ] : [
-              p.kind === 'run' && p.cwd && p.harness && p.isRepo ? el('button', {
-                class: 'btn btn-primary btn-sm',
-                text: 'Retomar no painel',
-                title: `Cria uma sessão do painel em ${p.cwd} (o harness restaura a conversa mais recente) e encerra o processo externo`,
-                onclick: () => confirmModal({
+              p.kind === 'run' && p.cwd && p.harness && p.isRepo ? btn({
+                  kind: 'primary', size: 'sm', text: 'Retomar no painel',
+                  title: `Cria uma sessão do painel em ${p.cwd} (o harness restaura a conversa mais recente) e encerra o processo externo`,
+                  onClick: () => confirmModal({
                   title: `Retomar ${p.harness} no painel`,
                   message: `Abre uma sessão do painel em ${p.cwd} sem --fresh (o harness restaura a conversa mais recente) e encerra o processo externo do terminal ${p.tty || '—'}. O ai-memory segura um lease do workstream por ~90s após o processo morrer, então pode levar alguns minutos. Continuar?`,
                   word: 'retomar',
@@ -2847,14 +2826,14 @@ VIEWS.sessions = async (main) => {
                     }
                     refreshHost().catch(() => {});
                     refreshList().catch(() => {});
-                  },
-                }),
+                  } }),
               }) : null,
-              el('button', {
-                class: 'btn btn-danger btn-sm',
+              btn({
                 text: 'Encerrar',
+                danger: true,
+                size: 'sm',
                 title: 'Envia SIGTERM ao processo (o painel não tem o I/O dele)',
-                onclick: () => confirmModal({
+                onClick: () => confirmModal({
                   title: `Encerrar ${p.kind === 'run' ? (p.harness || 'run') : p.kind} (pid ${p.pid})`,
                   message: `Processo no terminal ${p.tty || '—'}, vivo há ${p.started ? timeAgo(p.started) : '?'}. Enviar SIGTERM?`,
                   word: 'encerrar',
@@ -2901,7 +2880,7 @@ VIEWS.sessions = async (main) => {
     ),
     el('h2', { class: 'view-head' },
       el('span', { text: 'Sessões' }),
-      el('button', { class: 'btn btn-secondary btn-sm', text: 'limpar encerradas', title: 'Remove da lista todas as sessões que já terminaram', onclick: clearEnded }),
+      btn({ size: 'sm', text: 'Limpar encerradas', title: 'Remove da lista todas as sessões que já terminaram', onClick: clearEnded }),
     ),
     cardsEl,
     el('h2', { class: 'view-head' }, el('span', { text: 'Rodando fora do painel' }), el('span', { class: 'chip', text: 'no seu terminal' })),
@@ -2926,7 +2905,7 @@ VIEWS.sessions = async (main) => {
 // ---------- view: memórias ----------
 
 VIEWS.memories = async (main) => {
-  const state = { scopes: [], scopeKey: 'global', items: [], activePath: null };
+  const state = { scopes: [], byKey: new Map(), scopeKey: 'global', items: [], activePath: null };
 
   const scopeSel = el('select', { class: 'field', style: 'max-width:280px' });
   const searchInput = el('input', { class: 'field', placeholder: 'buscar nas memórias…', autocomplete: 'off', style: 'flex:1' });
@@ -2955,9 +2934,10 @@ VIEWS.memories = async (main) => {
         return el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}${pages}${tag}` });
       }),
     );
-    if (state.scopes.length) state.scopeKey = 'global';
   }
 
+  // o escopo vem do mapa, não de um split('/') do value: workspace ou projeto
+  // com "/" no nome quebraria o parse
   function currentScope() {
     if (state.scopeKey === 'global') return null;
     const entry = state.byKey.get(state.scopeKey);
@@ -3006,7 +2986,7 @@ VIEWS.memories = async (main) => {
     const scope = currentScope();
     if (!q) {
       if (scope) await loadRecent();
-      else { state.items = []; renderResults(); }
+      else { state.items = []; renderResults(null, 'escolha um projeto para ver as páginas recentes, ou digite algo para buscar em todos'); }
       return;
     }
     resultList.replaceChildren(el('div', { class: 'empty', text: 'buscando…' }));
@@ -3074,6 +3054,7 @@ VIEWS.memories = async (main) => {
       reader.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `erro: ${err.message}` })));
     }
   }
+
   // Trocar de projeto preserva o que já estava digitado: quem estava procurando
   // "sweep" no global quer "sweep" no projeto escolhido, não uma lista vazia.
   // runSearch já decide o caso (vazio+escopo → recentes, vazio+global → limpa,
@@ -3085,7 +3066,7 @@ VIEWS.memories = async (main) => {
     runSearch();
   }
 
-  const searchBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Buscar projeto…', title: 'Buscar projeto/workspace pelo nome ou pelo caminho, em todos os projetos do servidor', onclick: () => {
+  const searchBtn = btn({ kind: 'secondary', size: 'sm', text: 'Buscar projeto…', title: 'Buscar projeto/workspace pelo nome ou pelo caminho, em todos os projetos do servidor', onClick: () => {
       // sem novo fetch: o inventário já veio no mount (loadScopes), e o filtro do
       // modal roda sobre um array em memória — abrir é instantâneo
       projectPickerModal({
@@ -3102,7 +3083,6 @@ VIEWS.memories = async (main) => {
     },
   });
 
-
   let debounce = null;
   searchInput.addEventListener('input', () => {
     clearTimeout(debounce);
@@ -3111,20 +3091,14 @@ VIEWS.memories = async (main) => {
   searchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { clearTimeout(debounce); runSearch(); }
   });
-  scopeSel.addEventListener('change', () => {
-    state.scopeKey = scopeSel.value;
-    state.activePath = null;
-    searchInput.value = '';
-    if (currentScope()) loadRecent();
-    else { state.items = []; renderResults(null, 'modo global: use a busca'); }
-  });
+  scopeSel.addEventListener('change', () => applyScope(scopeSel.value));
 
   const invNote = el('div', { class: 'small muted', style: 'margin-top:6px' });
 
   main.append(
     el('div', { class: 'card' },
-      el('div', { class: 'row', style: 'flex-wrap:wrap' }, scopeSel, searchInput),
-      el('div', { class: 'small muted', style: 'margin-top:6px', text: 'Busca global cobre todos os projetos; escolhendo um projeto, as páginas recentes aparecem sem digitar nada.' }),
+      el('div', { class: 'row', style: 'flex-wrap:wrap' }, scopeSel, searchInput, searchBtn),
+      el('div', { class: 'small muted', style: 'margin-top:6px', text: 'Busca global cobre todos os projetos; escolhendo um projeto, as páginas recentes aparecem sem digitar nada — e a busca já escrita refaz no projeto novo.' }),
       invNote,
     ),
     el('div', { class: 'split' },
@@ -3196,7 +3170,7 @@ VIEWS.import = async (main) => {
     { class: 'card stack', style: 'display:none' },
     el('div', { class: 'row-between' },
       el('div', { class: 'row' }, el('strong', { text: 'Log da importação' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
-      el('div', { class: 'row' }, statusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); logCard.style.display = 'none'; } })),
+      el('div', { class: 'row' }, statusChip, btn({ text: 'Fechar', size: 'sm', onClick: () => { stopLogStream(); logCard.style.display = 'none'; } })),
     ),
     el('div', { class: 'log-panel' }),
   );
@@ -3206,8 +3180,8 @@ VIEWS.import = async (main) => {
     el('div', { class: 'row-between' },
       el('strong', { text: 'De onde vêm as memórias' }),
       el('div', { class: 'row' },
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => loadSources() }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: '? como funciona', onclick: importHelpModal }),
+        btn({ text: 'Atualizar', size: 'sm', onClick: () => loadSources() }),
+        helpBtn('como a importação de memórias funciona e o que ela toca', importHelpModal),
       ),
     ),
     el('div', { class: 'small muted', text: 'O painel lê as memórias curadas do Grok e do Kiro no seu home, os bundles exportados pelo próprio ai-memory, resolve o projeto de cada uma pelos vínculos do client-projects.json e grava páginas no ai-memory (via MCP, com a CLI como reserva). Nada é gravado antes de você revisar a lista: o scan é somente leitura e cada item pode ser aberto, redirecionado ou descartado.' }),
@@ -3281,12 +3255,7 @@ VIEWS.import = async (main) => {
           : el('span', { class: 'chip', text: 'nunca importado' }),
       ),
       src.warnings.length ? el('div', { class: 'small', style: 'color:var(--attention)', text: src.warnings.slice(0, 3).join(' · ') }) : null,
-      el('div', {}, el('button', {
-        class: 'btn btn-primary btn-sm',
-        text: 'Escanear',
-        disabled: !src.available,
-        onclick: () => doScan(src.id),
-      })),
+      el('div', {}, btn({ kind: 'primary', size: 'sm', text: 'Escanear', onClick: () => doScan(src.id) })),
     );
   }
 
@@ -3313,11 +3282,7 @@ VIEWS.import = async (main) => {
       value: state.bundleFile && !known ? state.bundleFile : '',
     });
     const chosen = () => pathInput.value.trim() || sel.value;
-    const scanBtn = el('button', {
-      class: 'btn btn-primary btn-sm',
-      text: 'Escanear',
-      onclick: () => { state.bundleFile = chosen(); if (!state.bundleFile) { toast('escolha o arquivo do bundle', 'err'); return; } doScan('bundle'); },
-    });
+    const scanBtn = btn({ kind: 'primary', size: 'sm', text: 'Escanear', onClick: () => { state.bundleFile = chosen(); if (!state.bundleFile) { toast('escolha o arquivo do bundle', 'err'); return; } doScan('bundle'); } });
     const selected = bundles.find((b) => b.file === state.bundleFile);
     return el('div', { class: 'card stack' },
       el('div', { class: 'row-between' },
@@ -3340,7 +3305,7 @@ VIEWS.import = async (main) => {
       last
         ? el('div', { class: 'small muted', text: `último import desta fonte: ${timeAgo(last.endedAt) || 'agora'} · ${last.imported} importada(s)${last.failed ? ` · ${last.failed} falha(s)` : ''}` })
         : null,
-      el('div', { class: 'row' }, scanBtn, el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => loadSources() })),
+      el('div', { class: 'row' }, scanBtn, btn({ text: 'Atualizar', size: 'sm', onClick: () => loadSources() })),
     );
   }
 
@@ -3441,8 +3406,8 @@ VIEWS.import = async (main) => {
         counts.noTarget ? el('span', { class: 'chip chip-err', text: `${counts.noTarget} sem destino — serão pulados` }) : null,
       ),
       el('div', { class: 'row' },
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'simular (dry-run)', disabled: !selectedCount, onclick: () => startImport(true) }),
-        el('button', { class: 'btn btn-primary btn-sm', text: 'Importar selecionados', disabled: !selectedCount, onclick: () => startImport(false) }),
+        btn({ size: 'sm', text: 'Simular (dry-run)', disabled: true, onClick: () => startImport(true) }),
+        btn({ size: 'sm', text: 'Importar selecionados', disabled: true, onClick: () => startImport(false) }),
       ),
     );
 
@@ -3455,8 +3420,8 @@ VIEWS.import = async (main) => {
         el('strong', { text: g === NO_TARGET ? 'sem destino (escolha um projeto)' : g === '_global' ? '_global (todos os projetos)' : g }),
         el('span', { class: 'chip', text: `${list.length} item(ns)` }),
         el('div', { class: 'row', style: 'gap:4px' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'marcar', onclick: () => { for (const it of list) state.selected.add(it.key); renderScan(); } }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'desmarcar', onclick: () => { for (const it of list) state.selected.delete(it.key); renderScan(); } }),
+          btn({ text: 'Marcar', size: 'sm', onClick: () => { for (const it of list) state.selected.add(it.key); renderScan(); } }),
+          btn({ text: 'Desmarcar', size: 'sm', onClick: () => { for (const it of list) state.selected.delete(it.key); renderScan(); } }),
         ),
       );
       if (g === NO_TARGET) header.append(targetPicker(list));
@@ -3484,8 +3449,8 @@ VIEWS.import = async (main) => {
           ),
         ),
         el('div', { class: 'row', style: 'flex-wrap:wrap' }, searchInput,
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'marcar visíveis', onclick: selectAll }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'limpar seleção', onclick: clearAll }),
+          btn({ text: 'Marcar visíveis', size: 'sm', onClick: selectAll }),
+          btn({ text: 'Limpar seleção', size: 'sm', onClick: clearAll }),
         ),
         state.scan.warnings.length
           ? el('div', { class: 'small', style: 'color:var(--attention)', text: `avisos: ${state.scan.warnings.slice(0, 4).join(' · ')}${state.scan.warnings.length > 4 ? ` (+${state.scan.warnings.length - 4})` : ''}` })
@@ -3537,10 +3502,7 @@ VIEWS.import = async (main) => {
       ...state.links.map((l) => el('option', { value: `${l.workspace}/${l.project}`, text: `${l.workspace} / ${l.project}${l.path ? ` — ${l.path}` : ''}` })),
     );
     return el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, sel,
-      el('button', {
-        class: 'btn btn-secondary btn-sm',
-        text: 'aplicar ao grupo',
-        onclick: () => {
+      btn({ size: 'sm', text: 'Aplicar ao grupo', onClick: () => {
           if (!sel.value) return;
           for (const it of list) {
             if (sel.value === '__global') state.overrides[it.key] = { ...(state.overrides[it.key] || {}), global: true };
@@ -3550,8 +3512,7 @@ VIEWS.import = async (main) => {
             }
           }
           renderScan();
-        },
-      }),
+        } }),
     );
   }
 
@@ -3581,9 +3542,9 @@ VIEWS.import = async (main) => {
         el('div', { class: 'small muted', text: adjusted ? 'destino/opções ajustados na tela' : it.targetReason }),
       ),
       el('div', { class: 'row', style: 'gap:4px; align-self:flex-start' },
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'ver', onclick: () => openItem(it) }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'destino', onclick: () => openTarget(it) }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'opções', onclick: () => openOptions(it) }),
+        btn({ text: 'Ver', size: 'sm', onClick: () => openItem(it) }),
+        btn({ text: 'Destino', size: 'sm', onClick: () => openTarget(it) }),
+        btn({ text: 'Opções', size: 'sm', onClick: () => openOptions(it) }),
       ),
     );
   }
@@ -3848,15 +3809,11 @@ VIEWS.import = async (main) => {
         el('td', { class: run.failed ? 'mono' : 'mono muted', text: run.failed ? `${run.failed} falha(s)` : '—' }),
         el('td', { class: 'mono muted', text: `${run.skipped || 0} ignorada(s)` }),
         el('td', { text: fmtDuration((run.endedAt || 0) - (run.startedAt || 0)) }),
-        el('td', {}, run.jobId ? el('button', {
-          class: 'btn btn-secondary btn-sm',
-          text: 'ver log',
-          onclick: async () => {
+        el('td', {}, run.jobId ? btn({ kind: 'secondary', size: 'sm', text: 'Ver log', onClick: async () => {
             logCard.style.display = '';
             await showJob(run.jobId, logCard, statusChip, { scopeNote: run.source });
             logCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          },
-        }) : null),
+          } }) : null),
       ));
     }
     historyCard.replaceChildren(
@@ -3864,7 +3821,7 @@ VIEWS.import = async (main) => {
         el('strong', { text: 'Importações recentes' }),
         el('div', { class: 'row' },
           el('span', { class: 'chip', text: `${data.imported} página(s) registradas` }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => renderHistory() }),
+          btn({ text: 'Atualizar', size: 'sm', onClick: () => renderHistory() }),
         ),
       ),
       el('table', { class: 'table' },
@@ -3933,7 +3890,7 @@ VIEWS.export = async (main) => {
         el('p', { class: 'small muted', style: 'margin:0', text: `A exportação lê o volume do store LOCAL (${setup.paths.storeDir}), que não existe nesta máquina — as memórias do servidor conectado (${setup.server.url}) ficam nele, não aqui.` }),
         el('p', { class: 'small muted', style: 'margin:0', text: 'Quando existir um store local (Docker ou ai-memory local), a entrada volta no dashboard — card "CLI e dados locais".' }),
         el('div', { class: 'row', style: 'gap:6px' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Voltar ao painel', onclick: () => { location.hash = 'dashboard'; } }),
+          btn({ text: 'Voltar ao painel', size: 'sm', onClick: () => { location.hash = 'dashboard'; } }),
         ),
       ),
     );
@@ -3962,7 +3919,7 @@ VIEWS.export = async (main) => {
     { class: 'card stack', style: 'display:none' },
     el('div', { class: 'row-between' },
       el('div', { class: 'row' }, el('strong', { text: 'Log da exportação' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
-      el('div', { class: 'row' }, statusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); logCard.style.display = 'none'; } })),
+      el('div', { class: 'row' }, statusChip, btn({ text: 'Fechar', size: 'sm', onClick: () => { stopLogStream(); logCard.style.display = 'none'; } })),
     ),
     el('div', { class: 'log-panel' }),
   );
@@ -3971,8 +3928,8 @@ VIEWS.export = async (main) => {
     el('div', { class: 'row-between' },
       el('strong', { text: 'Levar as memórias para outro servidor' }),
       el('div', { class: 'row' },
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: () => load() }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: '? como funciona', onclick: exportHelpModal }),
+        btn({ text: 'Atualizar', size: 'sm', onClick: () => load() }),
+        helpBtn('como a exportação de bundle funciona e o que ela toca', exportHelpModal),
       ),
     ),
     el('div', { class: 'small muted', text: 'O painel junta as páginas dos escopos escolhidos (o conteúdo vem do próprio wiki; a lista de páginas vem do SQLite do servidor) num .tar.gz com manifesto, e grava na pasta de exports. Esse arquivo é o que a aba Importar consome — aqui mesmo ou em outra máquina, apontando para o servidor de destino.' }),
@@ -4074,8 +4031,8 @@ VIEWS.export = async (main) => {
           el('span', { class: 'chip', text: `${chosen().length} de ${state.scopes.length} escopo(s)` }),
         ),
         el('div', { class: 'row' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'todos', onclick: () => pick(true) }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'nenhum', onclick: () => pick(false) }),
+          btn({ text: 'Todos', size: 'sm', onClick: () => pick(true) }),
+          btn({ text: 'Nenhum', size: 'sm', onClick: () => pick(false) }),
         ),
       ),
       el('div', { class: 'row', style: 'flex-wrap:wrap; gap:12px' },
@@ -4084,8 +4041,8 @@ VIEWS.export = async (main) => {
       el('div', { class: 'small muted', text: 'Sem os crus, ficam de fora as páginas de sessão/histórico (tier episodic, sessions/, log-*.md). As páginas de _rules, gotchas, decisions e notes vão sempre com frontmatter, tier, tags e pinned preservados.' }),
       el('div', { class: 'stack', style: 'gap:6px' }, ...rows),
       el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, nameInput,
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'simular (dry-run)', disabled: !chosen().length, onclick: planExport }),
-        el('button', { class: 'btn btn-primary btn-sm', text: 'Exportar bundle', disabled: !chosen().length || state.busy, onclick: startExport }),
+        btn({ size: 'sm', text: 'Simular (dry-run)', disabled: true, onClick: planExport }),
+        btn({ size: 'sm', text: 'Exportar bundle…', disabled: true, onClick: startExport }),
       ),
     );
   }
@@ -4175,9 +4132,9 @@ VIEWS.export = async (main) => {
       el('td', { text: fmtBytes(b.bytes) || '—' }),
       el('td', { text: timeAgo(b.mtime) || '—' }),
       el('td', {}, el('div', { class: 'row', style: 'gap:4px' },
-        el('a', { class: 'btn btn-secondary btn-sm', href: `/api/export/download?file=${encodeURIComponent(b.file)}`, download: b.file, text: 'baixar' }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'importar', onclick: () => { PENDING_BUNDLE = b.file; location.hash = 'import'; } }),
-        el('button', { class: 'btn btn-secondary btn-sm', text: 'excluir', onclick: () => confirmModal({
+        el('a', { class: 'btn btn-secondary btn-sm', href: `/api/export/download?file=${encodeURIComponent(b.file)}`, download: b.file, text: 'Baixar' }),
+        btn({ text: 'Importar', size: 'sm', onClick: () => { PENDING_BUNDLE = b.file; location.hash = 'import'; } }),
+        btn({ text: 'Excluir', size: 'sm', onClick: () => confirmModal({
           title: `Excluir ${b.file}`,
           message: `O arquivo ${b.file} será apagado de ${state.exportsDir}. O que já foi importado no ai-memory não muda.`,
           word: b.file,
@@ -4280,10 +4237,10 @@ VIEWS.skills = async (main) => {
     wsDetail: null,
     colData: null,
     colError: null,
+    colQuery: '',
     // nomes das skills que já estão na coleção do gestor: é o que decide onde
     // o "copiar p/ Gestor" aparece (as abas do catálogo não sabem disso sozinhas)
     colNames: null,
-    colQuery: '',
   };
   const list = el('div', { class: 'stack' });
 
@@ -4295,10 +4252,11 @@ VIEWS.skills = async (main) => {
     { class: 'card stack', style: 'display:none' },
     el('div', { class: 'row-between' },
       el('div', { class: 'row' }, el('strong', { text: 'Log do bundle de skills' }), el('span', { class: 'mono small muted', 'data-job-label': '', text: '' })),
-      el('div', { class: 'row' }, colStatusChip, el('button', { class: 'btn btn-secondary btn-sm', text: 'fechar', onclick: () => { stopLogStream(); colLogCard.style.display = 'none'; } })),
+      el('div', { class: 'row' }, colStatusChip, btn({ text: 'Fechar', size: 'sm', onClick: () => { stopLogStream(); colLogCard.style.display = 'none'; } })),
     ),
     el('div', { class: 'log-panel' }),
   );
+
   function applyColNames(names) {
     state.colNames = new Set(names || []);
   }
@@ -4335,7 +4293,6 @@ VIEWS.skills = async (main) => {
       : { name: skill.name, kind: 'managed' };
   }
 
-
   async function load() {
     wrap.replaceChildren(el('div', { class: 'empty', text: 'carregando skills…' }));
     try {
@@ -4344,6 +4301,7 @@ VIEWS.skills = async (main) => {
       wrap.replaceChildren(el('div', { class: 'card' }, el('p', { text: `Erro: ${err.message}` })));
       return;
     }
+    await ensureColNames();
     renderControls();
     renderList();
   }
@@ -4383,10 +4341,10 @@ VIEWS.skills = async (main) => {
       const col = state.colData;
       parts.push(
         el('div', { class: 'row', style: 'flex-wrap:wrap' },
-          el('button', { class: 'btn btn-primary btn-sm', text: 'Importar do harness…', onclick: openImportFromHarness }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Exportar bundle…', onclick: openExportBundle }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Importar bundle…', onclick: openImportBundle }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'atualizar', onclick: loadCollection }),
+          btn({ size: 'sm', text: 'Importar do harness…', onClick: openImportFromHarness }),
+          btn({ text: 'Exportar bundle…', size: 'sm', onClick: openExportBundle }),
+          btn({ text: 'Importar bundle…', size: 'sm', onClick: openImportBundle }),
+          btn({ text: 'Atualizar', size: 'sm', onClick: loadCollection }),
         ),
         colLogCard,
         col
@@ -4415,7 +4373,7 @@ VIEWS.skills = async (main) => {
       });
       parts.push(
         el('div', { class: 'row', style: 'flex-wrap:wrap' }, parentInput,
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'varrer', onclick: () => loadWorkspaces(parentInput.value.trim()) })),
+          btn({ text: 'Varrer', size: 'sm', onClick: () => loadWorkspaces(parentInput.value.trim()) })),
         el('div', { class: 'small muted', text: 'workspaces com skills de projeto (.claude, .agents, .opencode, .zcode, .grok, .kiro, .devin) — inclui projetos vinculados ao ai-memory' }),
       );
     } else {
@@ -4460,6 +4418,7 @@ VIEWS.skills = async (main) => {
       state.wsError = err.message;
       state.wsLoading = false;
     }
+    await ensureColNames();
     renderControls();
     renderList();
   }
@@ -4507,30 +4466,20 @@ VIEWS.skills = async (main) => {
           skill.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
           skill.diverged
             ? el('button', {
-                class: 'chip chip-warn chip-btn',
+                class: 'chip chip-btn chip-warn',
                 text: 'cópias diferentes · conciliar…',
                 title: 'Mesmo nome com conteúdos diferentes entre harnesses — comparar, ver o diff e alinhar as cópias',
                 onclick: () => openReconcile(skill),
               })
             : null,
           !inCollection(skill.name)
-            ? el('button', { text: 'Copiar p/ Gestor', title: 'copia a pasta da skill (SKILL.md + recursos) para a coleção do gestor — importar por cima de divergente salva o estado atual como versão', onclick: () => copyToGestor(bestCopySource(skill)) })
+            ? btn({ kind: 'secondary', size: 'sm', text: 'Copiar p/ Gestor', title: 'copia a pasta da skill (SKILL.md + recursos) para a coleção do gestor — importar por cima de divergente salva o estado atual como versão', onClick: () => copyToGestor(bestCopySource(skill)) })
             : null,
-          el('button', { text: 'SKILL.md', onclick: () => previewSkill(skill) }),
+          btn({ text: 'SKILL.md', size: 'sm', onClick: () => previewSkill(skill) }),
           copies > 1
-            ? el('button', {
-                class: 'btn btn-secondary btn-sm',
-                text: 'Cópias…',
-                title: `${copies} cópias desta skill em disco — comparar e conciliar`,
-                onclick: () => openReconcile(skill),
-              })
+            ? btn({ kind: 'secondary', size: 'sm', text: 'Cópias…', onClick: () => openReconcile(skill) })
             : null,
-          el('button', {
-            class: 'btn btn-primary btn-sm',
-            text: 'Instalar…',
-            disabled: !skill.installable,
-            onclick: () => openInstall(skill),
-          }),
+          btn({ kind: 'primary', size: 'sm', text: 'Instalar…', onClick: () => openInstall(skill) }),
         ),
       ),
       skill.description
@@ -4552,9 +4501,9 @@ VIEWS.skills = async (main) => {
     renderControls();
     renderList();
     try {
+      state.colData = await api('/api/collection/skills');
       // a listagem completa já sabe os nomes: sincroniza o cache sem outra chamada
       applyColNames(state.colData.skills.map((s) => s.name));
-      state.colData = await api('/api/collection/skills');
     } catch (err) {
       state.colError = err.message;
     }
@@ -4656,10 +4605,10 @@ VIEWS.skills = async (main) => {
         el('div', { class: 'row' },
           skill.versions ? el('span', { class: 'chip chip-info', text: `${skill.versions} versão(ões)` }) : null,
           el('span', { class: 'chip', text: `${skill.files} arquivo(s) · ${fmtBytes(skill.bytes) || '0 B'}` }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver…', title: 'arquivos e recursos com preview renderizado', onclick: () => openCollectionView(skill) }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Editar…', title: 'editar o SKILL.md e arquivos de texto da skill (salvar cria uma versão do estado anterior)', onclick: () => openCollectionEditor(skill) }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Versões…', onclick: () => openVersions(skill) }),
-          el('button', { class: 'btn btn-primary btn-sm', text: 'Instalar…', onclick: () => openCollectionInstall(skill) }),
+          btn({ size: 'sm', text: 'Ver…', title: 'arquivos e recursos com preview renderizado', onClick: () => openCollectionView(skill) }),
+          btn({ size: 'sm', text: 'Editar…', title: 'editar o SKILL.md e arquivos de texto da skill (salvar cria uma versão do estado anterior)', onClick: () => openCollectionEditor(skill) }),
+          btn({ text: 'Versões…', size: 'sm', onClick: () => openVersions(skill) }),
+          btn({ size: 'sm', text: 'Instalar…', onClick: () => openCollectionInstall(skill) }),
         ),
       ),
       skill.description
@@ -4675,7 +4624,7 @@ VIEWS.skills = async (main) => {
         el('strong', { text: item.name }),
         el('div', { class: 'row' },
           el('span', { class: 'chip chip-warn', text: `${item.versions} versão(ões) retidas` }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'Restaurar versão…', onclick: () => openVersions({ name: item.name }) }),
+          btn({ text: 'Restaurar versão…', size: 'sm', onClick: () => openVersions({ name: item.name }) }),
         ),
       ),
       el('div', { class: 'small muted', text: 'não está mais em <coleção>/<nome>; restaurar uma versão recria a pasta' }),
@@ -4718,7 +4667,7 @@ VIEWS.skills = async (main) => {
     if (editable.some((f) => f.rel === initialRel)) sel.value = initialRel;
     const ta = el('textarea', { class: 'field', style: 'min-height:48vh; white-space:pre; overflow:auto', spellcheck: 'false' });
     const warn = el('div', { class: 'small', style: 'display:none; color: var(--attention)' });
-    const saveBtn = el('button', { class: 'btn btn-primary', text: 'Salvar', onclick: saveCurrent });
+    const saveBtn = btn({ kind: 'primary', text: 'Salvar', onClick: saveCurrent });
     const closeFn = modal({
       title: `Editar "${skill.name}"`,
       wide: true,
@@ -4730,8 +4679,7 @@ VIEWS.skills = async (main) => {
         warn,
         el('div', { class: 'small muted', text: 'salvar grava o arquivo e registra o estado anterior da skill como nova versão ("antes de editar").' }),
       ),
-      actions: [{ label: 'Cancelar' }, saveBtn],
-    });
+      actions: [{ label: 'Cancelar' }, saveBtn] });
 
     function checkFrontmatter() {
       if (sel.value !== 'SKILL.md') {
@@ -4835,17 +4783,13 @@ VIEWS.skills = async (main) => {
         });
     };
 
-    const installBtn = el('button', {
-      class: 'btn btn-primary',
-      text: 'Instalar',
-      onclick: () => {
+    const installBtn = btn({ kind: 'primary', text: 'Instalar', onClick: () => {
         if (forceMode) {
           confirmModal({
             title: 'Forçar instalação',
             message: `"${skill.name}" já existe no destino sem o marker gerenciado e será sobrescrita — a pasta atual vai para o root de backups (.skill-backups). Continuar?`,
             word: 'instalar',
-            onConfirm: () => run(true),
-          });
+            onConfirm: () => run(true) });
         } else {
           run(false);
         }
@@ -4882,12 +4826,7 @@ VIEWS.skills = async (main) => {
         return;
       }
       const noteInput = el('input', { class: 'field', placeholder: 'nota da versão (opcional)', autocomplete: 'off' });
-      const saveBtn = el('button', {
-        class: 'btn btn-primary btn-sm',
-        text: 'Salvar versão agora',
-        disabled: !data.inCollection,
-        title: data.inCollection ? '' : 'a skill não está mais na coleção',
-        onclick: async () => {
+      const saveBtn = btn({ kind: 'primary', size: 'sm', text: 'Salvar versão agora', onClick: async () => {
           try {
             const out = await api('/api/collection/skills/version', { method: 'POST', body: { name: skill.name, note: noteInput.value.trim() || null } });
             toast(`versão ${out.version} salva`, 'ok');
@@ -4896,8 +4835,7 @@ VIEWS.skills = async (main) => {
           } catch (err) {
             toast(err.message, 'err');
           }
-        },
-      });
+        } });
 
       const rows = data.versions.map((v) => el('div', { class: 'imp-item' },
         el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
@@ -4912,12 +4850,8 @@ VIEWS.skills = async (main) => {
           v.note ? el('div', { class: 'small muted', text: v.note }) : null,
         ),
         el('div', { class: 'row', style: 'gap:4px' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver', disabled: !v.exists, onclick: () => previewCollectionContent(skill.name, v.id) }),
-          el('button', {
-            class: 'btn btn-secondary btn-sm',
-            text: 'restaurar',
-            disabled: !v.exists,
-            onclick: () => confirmModal({
+          btn({ size: 'sm', text: 'Ver', disabled: true, onClick: () => previewCollectionContent(skill.name, v.id) }),
+          btn({ kind: 'secondary', size: 'sm', text: 'Restaurar', onClick: () => confirmModal({
               title: `Restaurar v${v.id} de "${skill.name}"`,
               message: `A pasta atual da coleção será substituída pelo conteúdo de v${v.id}. O estado atual é salvo antes como nova versão ("antes de restaurar").`,
               word: 'restaurar',
@@ -4930,8 +4864,7 @@ VIEWS.skills = async (main) => {
                 } catch (err) {
                   toast(err.message, 'err');
                 }
-              },
-            }),
+              } }),
           }),
         ),
       ));
@@ -4964,7 +4897,7 @@ VIEWS.skills = async (main) => {
       el('div', { class: 'small muted', text: 'carregando skills do harness…' }));
     const countChip = el('span', { class: 'chip chip-info', text: '0 selecionada(s)' });
     const boxes = new Map(); // nome -> { cb, item }
-    const importBtn = el('button', { class: 'btn btn-primary', text: 'Importar selecionadas', disabled: true, onclick: run });
+    const importBtn = btn({ kind: 'primary', text: 'Importar selecionadas', title: 'Importar skills do harness para a coleção', disabled: true, onClick: run });
     const closeFn = modal({
       title: 'Importar skills do harness para a coleção',
       wide: true,
@@ -4972,15 +4905,14 @@ VIEWS.skills = async (main) => {
         el('div', { class: 'field-label', text: 'Harness de origem' }),
         selH,
         el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'todos', onclick: () => pick(true) }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'nenhum', onclick: () => pick(false) }),
+          btn({ text: 'Todos', size: 'sm', onClick: () => pick(true) }),
+          btn({ text: 'Nenhum', size: 'sm', onClick: () => pick(false) }),
           countChip,
         ),
         listBox,
         el('div', { class: 'small muted', text: 'a cópia para a coleção inclui os arquivos da skill (scripts, referências, assets). Importar por cima de uma versão divergente salva o estado atual como nova versão.' }),
       ),
-      actions: [{ label: 'Cancelar' }, importBtn],
-    });
+      actions: [{ label: 'Cancelar' }, importBtn] });
 
     function syncCount() {
       const n = [...boxes.values()].filter((v) => v.cb.checked).length;
@@ -5083,10 +5015,7 @@ VIEWS.skills = async (main) => {
 
   function openExportBundle() {
     const nameInput = el('input', { class: 'field mono', placeholder: 'nome do arquivo (opcional)', autocomplete: 'off' });
-    const exportBtn = el('button', {
-      class: 'btn btn-primary',
-      text: 'Exportar bundle',
-      onclick: async () => {
+    const exportBtn = btn({ kind: 'primary', text: 'Exportar bundle', onClick: async () => {
         let started;
         try {
           started = await api('/api/collection/bundle/export', { method: 'POST', body: { name: nameInput.value.trim() || null } });
@@ -5096,8 +5025,7 @@ VIEWS.skills = async (main) => {
         }
         closeFn?.();
         watchCollectionJob(started, 'bundle de skills pronto');
-      },
-    });
+      } });
     const closeFn = modal({
       title: 'Exportar bundle de skills',
       bodyNode: el('div', { class: 'stack' },
@@ -5145,7 +5073,7 @@ VIEWS.skills = async (main) => {
       scanBtn.disabled = false;
       renderResults(scan);
     }
-    const scanBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Escanear', onclick: doScan });
+    const scanBtn = btn({ size: 'sm', text: 'Escanear', onClick: doScan });
 
     const scanRow = el('div', { class: 'row' }, scanBtn);
 
@@ -5171,10 +5099,7 @@ VIEWS.skills = async (main) => {
       });
       const pick = (on) => () => { for (const cb of boxes.values()) cb.checked = on; };
 
-      const importBtn = el('button', {
-        class: 'btn btn-primary btn-sm',
-        text: 'Importar selecionadas',
-        onclick: async () => {
+      const importBtn = btn({ kind: 'primary', size: 'sm', text: 'Importar selecionadas', onClick: async () => {
           const names = [...boxes.entries()].filter(([, cb]) => cb.checked).map(([name]) => name);
           if (!names.length) {
             toast('selecione ao menos uma skill', 'err');
@@ -5191,8 +5116,7 @@ VIEWS.skills = async (main) => {
           }
           closeFn?.();
           watchCollectionJob(started, 'importação do bundle concluída');
-        },
-      });
+        } });
 
       // replaceChildren não tolera null (viraria texto "null" na tela)
       bodyBox.replaceChildren(...[
@@ -5202,8 +5126,8 @@ VIEWS.skills = async (main) => {
         ),
         scan.warnings?.length ? el('div', { class: 'small', style: 'color:var(--attention)', text: `avisos: ${scan.warnings.slice(0, 4).join(' · ')}` }) : null,
         el('div', { class: 'row', style: 'flex-wrap:wrap; gap:8px' },
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'todos', onclick: pick(true) }),
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'nenhum', onclick: pick(false) }),
+          btn({ text: 'Todos', size: 'sm', onClick: pick(true) }),
+          btn({ text: 'Nenhum', size: 'sm', onClick: pick(false) }),
           el('label', { class: 'check', style: 'display:flex; gap:6px; align-items:center' }, updateCb, 'atualizar divergentes (estado atual vira versão)'),
         ),
         el('div', { class: 'stack', style: 'gap:6px' }, ...rows),
@@ -5278,11 +5202,7 @@ VIEWS.skills = async (main) => {
 
   function renderWorkspaceDetail() {
     const d = state.wsDetail;
-    const back = el('button', {
-      class: 'btn btn-secondary btn-sm',
-      text: '← todos os workspaces',
-      onclick: () => { state.wsDetail = null; renderControls(); renderList(); },
-    });
+    const back = btn({ kind: 'secondary', size: 'sm', text: '← todos os workspaces', onClick: () => { state.wsDetail = null; renderControls(); renderList(); } });
     const parts = [el('div', { class: 'view-head' }, el('strong', { text: d.name || d.dir }), back)];
     if (d.loading) {
       list.replaceChildren(...parts, el('div', { class: 'empty', text: 'carregando workspace…' }));
@@ -5308,15 +5228,22 @@ VIEWS.skills = async (main) => {
   }
 
   function wsSkillCard(d, h, sk) {
+    // fonte da cópia uma vez só: o botão e o viewer usam o mesmo payload
+    const src = {
+      label: `${h.label} · projeto`,
+      title: sk.path,
+      params: { name: sk.name, harness: h.id, ws: d.dir },
+      copy: { name: sk.name, harness: h.id, ws: d.dir },
+    };
     return el('div', { class: 'card stack' },
       el('div', { class: 'row-between' },
         el('strong', { text: sk.name }),
         el('div', { class: 'row' },
           sk.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
           !inCollection(sk.name)
-            ? el('button', { text: 'Copiar p/ Gestor', onclick: () => copyToGestor(src.copy) })
+            ? btn({ kind: 'secondary', size: 'sm', text: 'Copiar p/ Gestor', onClick: () => copyToGestor(src.copy) })
             : null,
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'SKILL.md', onclick: () => openSkillViewer({
+          btn({ kind: 'secondary', size: 'sm', text: 'SKILL.md', onClick: () => openSkillViewer({
               title: `${sk.name} · ${d.name}`,
               managed: sk.managed,
               sources: [{ label: `${h.label} · projeto`, title: sk.path, params: { name: sk.name, harness: h.id, ws: d.dir }, project: true }],
@@ -5341,13 +5268,13 @@ VIEWS.skills = async (main) => {
     const viewPane = el('div', { class: 'stack' });
     let activeFile = 'SKILL.md';
 
-    // ações do rodapé dependem da fonte ativa: editar só na coleção, copiar
-    // para o gestor só em cópia de projeto
+    // ações do rodapé dependem da fonte ativa: editar só na coleção, copiar para o
+    // gestor só nas fontes que trazem `copy` e enquanto a skill não está na coleção
     const editBtn = typeof onEdit === 'function'
-      ? el('button', { class: 'btn btn-secondary', text: 'Editar arquivo atual…', onclick: () => onEdit(sources[index], activeFile) })
+      ? btn({ text: 'Editar arquivo atual…', onClick: () => onEdit(sources[index], activeFile) })
       : null;
     const copyBtn = typeof onCopy === 'function'
-      ? el('button', { class: 'btn btn-secondary', text: 'Copiar para o Gestor…', title: 'copia esta skill de projeto para a coleção do gestor', onclick: () => onCopy(sources[index]) })
+      ? btn({ text: 'Copiar para o Gestor…', title: 'copia esta skill de projeto para a coleção do gestor', onClick: () => onCopy(sources[index].copy) })
       : null;
 
     modal({
@@ -5365,8 +5292,7 @@ VIEWS.skills = async (main) => {
           el('div', { class: 'stack', style: 'max-height:58vh; overflow:auto' }, viewPane),
         ),
       ),
-      actions: [...(editBtn ? [editBtn] : []), ...(copyBtn ? [copyBtn] : []), { label: 'Fechar' }],
-    });
+      actions: [...(editBtn ? [editBtn] : []), ...(copyBtn ? [copyBtn] : []), { label: 'Fechar' }] });
 
     headRow.replaceChildren(...[
       badge ? el('span', { class: 'chip chip-info', text: badge }) : null,
@@ -5492,16 +5418,30 @@ VIEWS.skills = async (main) => {
 
   function previewSkill(skill, initialLoc) {
     const locs = skill.locations || [];
+    // `copy` é a origem que o "Copiar para o Gestor…" usa nesta fonte; o catálogo
+    // gerenciado entra pelo ramo `managed` da importação
     const sources = locs.map((l) => ({
       label: `${l.harness}${l.kind !== 'user' ? ` · ${l.kind}` : ''}${l.outdated ? ' · desatualizada' : ''}`,
       title: l.path,
       params: { name: skill.name, harness: l.harness, kind: l.kind },
+      copy: { name: skill.name, harness: l.harness, kind: l.kind },
       preferred: Boolean(initialLoc && l.harness === initialLoc.harness && l.kind === initialLoc.kind),
     }));
     if (!sources.length) {
-      sources.push({ label: 'catálogo gerenciado do ai-memory', catalog: true, params: { name: skill.name } });
+      sources.push({
+        label: 'catálogo gerenciado do ai-memory',
+        catalog: true,
+        params: { name: skill.name },
+        copy: { name: skill.name, kind: 'managed' },
+      });
     }
-    openSkillViewer({ title: skill.name, managed: skill.managed, diverged: skill.diverged, sources });
+    openSkillViewer({
+      title: skill.name,
+      managed: skill.managed,
+      diverged: skill.diverged,
+      sources,
+      onCopy: (src) => copyToGestor(src.copy),
+    });
   }
 
   /**
@@ -5673,12 +5613,8 @@ VIEWS.skills = async (main) => {
           el('span', { class: 'small muted', text: `${c.fileCount} arquivo(s)` }),
           c.mtime ? el('span', { class: 'small muted', text: `atualizada ${timeAgo(c.mtime)}` }) : null,
           c.skillHash ? el('span', { class: 'small muted mono', text: c.skillHash.slice(0, 8) }) : null,
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'ver cópia', onclick: () => peekCopy(c) }),
-          isRef ? null : el('button', {
-            class: 'btn btn-secondary btn-sm',
-            text: state.diff?.id === c.id ? 'ocultar diff' : 'diff',
-            onclick: () => toggleDiff(c),
-          }),
+          btn({ text: 'Ver cópia', size: 'sm', onClick: () => peekCopy(c) }),
+          isRef ? null : btn({ kind: 'secondary', size: 'sm', onClick: () => toggleDiff(c) }),
         ),
         ...(state.diff?.id === c.id ? [diffPane(c)] : []),
       );
@@ -5796,10 +5732,11 @@ VIEWS.skills = async (main) => {
         );
       });
 
-      const runBtn = el('button', {
-        class: `btn ${plan.summary.needsConfirm ? 'btn-danger' : 'btn-primary'}`,
+      const runBtn = btn({
+        kind: 'primary',
+        danger: plan.summary.needsConfirm,
         text: 'Executar',
-        onclick: () => {
+        onClick: () => {
           if (!plan.summary.needsConfirm) {
             execute(plan);
             return;
@@ -5916,12 +5853,7 @@ VIEWS.skills = async (main) => {
       showPlan(plan);
     }
 
-    const reconcileBtn = el('button', {
-      class: 'btn btn-primary',
-      text: 'Conciliar…',
-      disabled: !(state.targets.size + state.extras.size),
-      onclick: () => runDry(),
-    });
+    const reconcileBtn = btn({ kind: 'primary', text: 'Conciliar…', onClick: () => runDry() });
 
     const closeFn = modal({
       title: `Cópias de "${skill.name}"`,
@@ -5987,17 +5919,13 @@ VIEWS.skills = async (main) => {
         });
     };
 
-    const installBtn = el('button', {
-      class: 'btn btn-primary',
-      text: 'Instalar',
-      onclick: () => {
+    const installBtn = btn({ kind: 'primary', text: 'Instalar', onClick: () => {
         if (forceMode) {
           confirmModal({
             title: 'Forçar instalação',
             message: `"${skill.name}" já existe no destino sem o marker gerenciado e será sobrescrita (será criado um backup .bak-*). Continuar?`,
             word: 'instalar',
-            onConfirm: () => run(true),
-          });
+            onConfirm: () => run(true) });
         } else {
           run(false);
         }
