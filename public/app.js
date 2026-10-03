@@ -4438,6 +4438,23 @@ VIEWS.skills = async (main) => {
     return el('div', { class: 'view-head' }, el('strong', { text }));
   }
 
+  /**
+   * Tag "Gestor": azul na coleção do gestor, esmaecida fora dela. Mesmo
+   * idioma de presente/ausente de locationChips — o que muda aqui é se a
+   * skill está na coleção, não se ela existe.
+   */
+  function gestorChip(name) {
+    const inCol = inCollection(name);
+    return el('span', {
+      class: inCol ? 'chip chip-info' : 'chip',
+      style: inCol ? null : 'opacity:.4',
+      text: 'Gestor',
+      title: inCol
+        ? 'esta skill está na coleção do gestor — a sua cópia editável'
+        : 'esta skill não está na coleção do gestor',
+    });
+  }
+
   function locationChips(skill) {
     return state.data.harnesses.map((h) => {
       const locs = (skill.locations || []).filter((l) => l.harness === h.id);
@@ -4460,10 +4477,11 @@ VIEWS.skills = async (main) => {
   function skillCard(skill) {
     const copies = (skill.locations || []).length;
     return el('div', { class: 'card stack' },
-      el('div', { class: 'row-between' },
+      el('div', { class: 'row-between', style: 'flex-wrap:wrap' },
         el('strong', { text: skill.name }),
-        el('div', { class: 'row' },
+        el('div', { class: 'row', style: 'flex-wrap:wrap' },
           skill.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
+          gestorChip(skill.name),
           skill.diverged
             ? el('button', {
                 class: 'chip chip-btn chip-warn',
@@ -5236,10 +5254,11 @@ VIEWS.skills = async (main) => {
       copy: { name: sk.name, harness: h.id, ws: d.dir },
     };
     return el('div', { class: 'card stack' },
-      el('div', { class: 'row-between' },
+      el('div', { class: 'row-between', style: 'flex-wrap:wrap' },
         el('strong', { text: sk.name }),
-        el('div', { class: 'row' },
+        el('div', { class: 'row', style: 'flex-wrap:wrap' },
           sk.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
+          gestorChip(sk.name),
           !inCollection(sk.name)
             ? btn({ kind: 'secondary', size: 'sm', text: 'Copiar p/ Gestor', onClick: () => copyToGestor(src.copy) })
             : null,
