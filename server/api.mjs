@@ -19,7 +19,7 @@ import { listLogs, readLog, streamLog } from './logs.mjs';
 import { setupStatus, cliRelease } from './setup-check.mjs';
 import { installCli, initClientDir, installHooks } from './cli-install.mjs';
 import { listHarnessMcp, previewHarnessMcp, applyHarnessMcp, applyHarnessMcpMany } from './harness-mcp.mjs';
-import { listCollectionSkills, getCollectionContent, listCollectionFiles, readCollectionFile, writeCollectionFile, listCollectionVersions, importToCollection, importToCollectionBatch, listHarnessSkills, saveCollectionVersion, restoreCollectionVersion, installCollectionSkill, exportSkillsBundle, resolveSkillsBundlePath, scanSkillsBundle, importSkillsBundle } from './skills-collection.mjs';
+import { listCollectionSkills, listCollectionSkillNames, getCollectionContent, listCollectionFiles, readCollectionFile, writeCollectionFile, listCollectionVersions, importToCollection, importToCollectionBatch, listHarnessSkills, saveCollectionVersion, restoreCollectionVersion, installCollectionSkill, exportSkillsBundle, resolveSkillsBundlePath, scanSkillsBundle, importSkillsBundle } from './skills-collection.mjs';
 import { expandTilde } from './config.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -680,6 +680,14 @@ export async function handleApi(req, res, url) {
     if (route === 'GET /api/collection/skills') {
       try {
         return json(res, 200, await listCollectionSkills());
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
+    }
+    // só os nomes, para as abas do catálogo saberem onde já não há o que copiar
+    if (route === 'GET /api/collection/skills/names') {
+      try {
+        return json(res, 200, { names: listCollectionSkillNames() });
       } catch (err) {
         return json(res, 500, { error: err.message });
       }

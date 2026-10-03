@@ -352,6 +352,38 @@ function scanCollection(dir) {
 }
 
 /**
+ * Só os nomes da coleção, sem inventariar arquivos: a tela usa isso para
+ * decidir onde oferecer "copiar p/ Gestor", e `scanCollection` hasheia a pasta
+ * inteira de cada skill — caro para uma lista de nomes. Mesma regra de
+ * pertinência de `scanCollection` (dot-dirs fora, exige SKILL.md, nome do
+ * frontmatter com fallback no nome da pasta).
+ */
+export function listCollectionSkillNames({ dir } = {}) {
+  const root = collectionRoot(dir);
+  const out = new Set();
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return []; // coleção ainda não existe
+  }
+  for (const entry of entries) {
+    if (out.size >= MAX_SKILLS) break;
+    if (entry.name.startsWith('.') || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
+    const skillDir = path.join(root, entry.name);
+    let text;
+    try {
+      if (!fs.statSync(skillDir).isDirectory()) continue;
+      text = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+    } catch {
+      continue; // symlink quebrado ou pasta sem SKILL.md
+    }
+    out.add((parseFrontmatter(text).name || entry.name).trim());
+  }
+  return [...out];
+}
+
+/**
  * Visão da coleção: skills, em quais harnesses estão instaladas, skills só com
  * versão (excluídas da coleção mas recuperáveis) e bundles na pasta de export.
  */

@@ -1668,6 +1668,60 @@ function commandCard(cmd, ctxInfo) {
 // workspace/projeto pelo nome ou pelo caminho local.
 
 const normText = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+/**
+ * Entradas de projeto para a busca: o que o SERVIDOR tem (admin/projects)
+ * cruzado com os vínculos desta máquina. `localScopes` é o retorno de
+ * /api/scopes. Órfãos (projetos vinculados aqui que o servidor não conhece)
+ * entram no fim. Se o servidor não responder, devolve só a lista local — e o
+ * motivo em `note`, para a tela avisar que a busca ficou parcial.
+ *
+ * Compartilhado por Manutenção e Memórias: as duas precisam do mesmo cruzamento,
+ * e duas cópias divergem com o tempo.
+ */
+async function loadProjectEntries(localScopes) {
+  let entries = (localScopes || []).map((s) => ({ workspace: s.workspace, project: s.project, path: s.path || null }));
+  let note = null;
+  let inventory = null;
+  try {
+    inventory = await api('/api/server-scopes');
+    if (!inventory?.ok) {
+      note = inventory?.error || 'servidor não respondeu';
+      return { entries, note, inventory };
+    }
+    const server = inventory.projects.map((p) => ({
+      workspace: p.workspace, project: p.project, pages: p.pages,
+      linked: p.linked, pathExists: p.pathExists, path: p.localPath,
+    }));
+    // dedupe contra o SERVIDOR, não contra a lista local: órfão é justamente um
+    // link local que o servidor não conhece, então comparar com a lista local
+    // descartava todos e o `entries = server` logo abaixo sumia com eles
+    const known = new Set(server.map((e) => `${e.workspace}/${e.project}`));
+    for (const o of inventory.orphans || []) {
+      const [workspace, project] = String(o.key).split('/');
+      if (workspace && project && !known.has(o.key)) {
+        server.push({ workspace, project, path: o.path, pathExists: o.pathExists, linked: true });
+        known.add(o.key);
+      }
+    }
+    if (server.length) entries = server;
+  } catch (err) {
+    note = err.message;
+  }
+  return { entries, note, inventory };
+}
+
+/**
+ * Garante que `sel` tenha a opção `value`. Um projeto escolhido na busca pode
+ * não estar na lista montada no mount, e sem isso o <select> volta sozinho
+ * para o primeiro item. `before` insere antes do nó indicado (a Manutenção
+ * deixa a opção "digitar…" sempre por último); sem ele, append.
+ */
+function ensureSelectOption(sel, value, text, before) {
+  if (sel.querySelector(`option[value="${CSS.escape(value)}"]`)) return false;
+  sel.insertBefore(el('option', { value, text }), before || null);
+  return true;
+}
+
 
 /**
  * Modal com filtro por workspace, projeto ou caminho. `entries` são
@@ -1827,7 +1881,11 @@ VIEWS.maintenance = async (main) => {
     onclick: async () => {
       searchBtn.disabled = true;
       searchBtn.textContent = 'carregando…';
-      await loadPickEntries();
+      // recarrega a cada clique: entre uma busca e outra a máquina pode ter
+      // vinculado outro projeto
+      const loaded = await loadProjectEntries(scopes);
+      pickEntries = loaded.entries;
+      inventoryNote = loaded.note;
       searchBtn.disabled = false;
       searchBtn.textContent = 'buscar projeto…';
       projectPickerModal({
@@ -2881,24 +2939,17 @@ VIEWS.memories = async (main) => {
     // que ESTA MÁQUINA vinculou (client-projects.json). O antigo /api/scopes só
     // devolvia o segundo — numa máquina recém-instalada a lista saía vazia
     // mesmo com o servidor cheio de projetos.
-    let inv = null;
-    try {
-      inv = await api('/api/server-scopes');
-    } catch {
-      inv = null;
-    }
-    const linked = (await api('/api/scopes').catch(() => ({ scopes: [] }))).scopes || [];
+    const local = await api('/api/scopes').catch(() => ({ scopes: [] }));
+    const linked = local.scopes || [];
+    const loaded = await loadProjectEntries(linked);
 
-    state.inventory = inv;
-    state.linked = linked;
-    const serverList = inv?.ok ? inv.projects.map((p) => ({ workspace: p.workspace, project: p.project, pages: p.pages, linked: p.linked, pathExists: p.pathExists })) : [];
-    state.scopes = serverList.length
-      ? serverList
-      : linked.map((s) => ({ workspace: s.workspace, project: s.project }));
+    state.inventory = loaded.inventory;
+    state.scopes = loaded.entries;
+    state.byKey = new Map(loaded.entries.map((e) => [`${e.workspace}/${e.project}`, e]));
 
     scopeSel.replaceChildren(
-      el('option', { value: 'global', text: `🌐 Global — todos os projetos${inv?.ok ? ` (${inv.total} no servidor)` : ''}` }),
-      ...state.scopes.map((s) => {
+      el('option', { value: 'global', text: `🌐 Global — todos os projetos${loaded.inventory?.ok ? ` (${loaded.inventory.total} no servidor)` : ''}` }),
+      ...loaded.entries.map((s) => {
         const tag = s.linked === undefined ? '' : (s.linked ? ' · vinculada' : ' · só no servidor');
         const pages = s.pages !== undefined ? ` (${s.pages} pág.)` : '';
         return el('option', { value: `${s.workspace}/${s.project}`, text: `${s.workspace} / ${s.project}${pages}${tag}` });
@@ -2909,8 +2960,9 @@ VIEWS.memories = async (main) => {
 
   function currentScope() {
     if (state.scopeKey === 'global') return null;
-    const [workspace, project] = state.scopeKey.split('/');
-    return { workspace, project };
+    const entry = state.byKey.get(state.scopeKey);
+    if (!entry) return null;
+    return { workspace: entry.workspace, project: entry.project };
   }
 
   function resultNode(item, idx) {
@@ -3022,6 +3074,34 @@ VIEWS.memories = async (main) => {
       reader.replaceChildren(el('div', { class: 'card' }, el('p', { class: 'small', text: `erro: ${err.message}` })));
     }
   }
+  // Trocar de projeto preserva o que já estava digitado: quem estava procurando
+  // "sweep" no global quer "sweep" no projeto escolhido, não uma lista vazia.
+  // runSearch já decide o caso (vazio+escopo → recentes, vazio+global → limpa,
+  // com texto → busca), então é o único caminho necessário.
+  function applyScope(value) {
+    state.scopeKey = value;
+    state.activePath = null;
+    reader.replaceChildren(el('div', { class: 'empty', text: 'selecione uma memória à esquerda' }));
+    runSearch();
+  }
+
+  const searchBtn = el('button', { class: 'btn btn-secondary btn-sm', text: 'Buscar projeto…', title: 'Buscar projeto/workspace pelo nome ou pelo caminho, em todos os projetos do servidor', onclick: () => {
+      // sem novo fetch: o inventário já veio no mount (loadScopes), e o filtro do
+      // modal roda sobre um array em memória — abrir é instantâneo
+      projectPickerModal({
+        entries: state.scopes,
+        current: state.scopeKey === 'global' ? null : state.scopeKey,
+        emptyHint: 'nenhum projeto bate com o filtro — o seletor acima ainda lista os últimos carregados',
+        onPick: (e) => {
+          const value = `${e.workspace}/${e.project}`;
+          state.byKey.set(value, e);
+          ensureSelectOption(scopeSel, value, `${e.workspace} / ${e.project}`);
+          scopeSel.value = value;
+          applyScope(value);
+        } });
+    },
+  });
+
 
   let debounce = null;
   searchInput.addEventListener('input', () => {
@@ -4200,6 +4280,9 @@ VIEWS.skills = async (main) => {
     wsDetail: null,
     colData: null,
     colError: null,
+    // nomes das skills que já estão na coleção do gestor: é o que decide onde
+    // o "copiar p/ Gestor" aparece (as abas do catálogo não sabem disso sozinhas)
+    colNames: null,
     colQuery: '',
   };
   const list = el('div', { class: 'stack' });
@@ -4216,6 +4299,42 @@ VIEWS.skills = async (main) => {
     ),
     el('div', { class: 'log-panel' }),
   );
+  function applyColNames(names) {
+    state.colNames = new Set(names || []);
+  }
+
+  /** A skill já está na coleção do gestor (sem isso, o botão aparece). */
+  function inCollection(name) {
+    return state.colNames?.has(name) ?? false;
+  }
+
+  /**
+   * Baixa os nomes da coleção uma vez por montagem da view. Falha não trava a
+   * tela: sem cache o botão aparece e a cópia funciona do mesmo jeito.
+   */
+  async function ensureColNames() {
+    if (state.colNames) return;
+    try {
+      const out = await api('/api/collection/skills/names');
+      applyColNames(out.names);
+    } catch {
+      applyColNames([]);
+    }
+  }
+
+  /**
+   * Cópia que o "copiar p/ Gestor" usa: a de kind user, senão a primeira em
+   * disco (mesma preferência de findLocation no servidor). Skill que só existe
+   * no catálogo gerenciado cai no ramo `managed` da importação.
+   */
+  function bestCopySource(skill) {
+    const locs = skill.locations || [];
+    const loc = locs.find((l) => l.kind === 'user') || locs[0];
+    return loc
+      ? { name: skill.name, harness: loc.harness, kind: loc.kind }
+      : { name: skill.name, kind: 'managed' };
+  }
+
 
   async function load() {
     wrap.replaceChildren(el('div', { class: 'empty', text: 'carregando skills…' }));
@@ -4394,7 +4513,10 @@ VIEWS.skills = async (main) => {
                 onclick: () => openReconcile(skill),
               })
             : null,
-          el('button', { class: 'btn btn-secondary btn-sm', text: 'SKILL.md', onclick: () => previewSkill(skill) }),
+          !inCollection(skill.name)
+            ? el('button', { text: 'Copiar p/ Gestor', title: 'copia a pasta da skill (SKILL.md + recursos) para a coleção do gestor — importar por cima de divergente salva o estado atual como versão', onclick: () => copyToGestor(bestCopySource(skill)) })
+            : null,
+          el('button', { text: 'SKILL.md', onclick: () => previewSkill(skill) }),
           copies > 1
             ? el('button', {
                 class: 'btn btn-secondary btn-sm',
@@ -4430,6 +4552,8 @@ VIEWS.skills = async (main) => {
     renderControls();
     renderList();
     try {
+      // a listagem completa já sabe os nomes: sincroniza o cache sem outra chamada
+      applyColNames(state.colData.skills.map((s) => s.name));
       state.colData = await api('/api/collection/skills');
     } catch (err) {
       state.colError = err.message;
@@ -4447,7 +4571,11 @@ VIEWS.skills = async (main) => {
       });
       if (out.skipped) toast(`"${out.name}" já está na coleção (idêntica)`);
       else toast(`"${out.name}" ${out.action} na coleção${out.snapshotId ? ` (estado anterior em v${out.snapshotId})` : ''}`, 'ok');
-      loadCollection();
+      state.colNames?.add(out.name);
+      // nas abas do catálogo basta re-renderizar: a lista completa da coleção
+      // seria um fetch pesado que elas não usam
+      if (state.tab === 'colecao') loadCollection();
+      else renderList();
     } catch (err) {
       toast(err.message, 'err');
     }
@@ -5185,16 +5313,10 @@ VIEWS.skills = async (main) => {
         el('strong', { text: sk.name }),
         el('div', { class: 'row' },
           sk.managed ? el('span', { class: 'chip chip-info', text: 'ai-memory' }) : null,
-          el('button', {
-            class: 'btn btn-secondary btn-sm',
-            text: 'copiar p/ Gestor',
-            title: `copia a pasta da skill (${d.name}) para a coleção do gestor — importar por cima de divergente salva o estado atual como versão`,
-            onclick: () => copyToGestor({ name: sk.name, harness: h.id, ws: d.dir }),
-          }),
-          el('button', {
-            class: 'btn btn-secondary btn-sm',
-            text: 'SKILL.md',
-            onclick: () => openSkillViewer({
+          !inCollection(sk.name)
+            ? el('button', { text: 'Copiar p/ Gestor', onclick: () => copyToGestor(src.copy) })
+            : null,
+          el('button', { class: 'btn btn-secondary btn-sm', text: 'SKILL.md', onclick: () => openSkillViewer({
               title: `${sk.name} · ${d.name}`,
               managed: sk.managed,
               sources: [{ label: `${h.label} · projeto`, title: sk.path, params: { name: sk.name, harness: h.id, ws: d.dir }, project: true }],
@@ -5260,7 +5382,7 @@ VIEWS.skills = async (main) => {
         onclick: () => { index = i; activeFile = 'SKILL.md'; renderSrcRow(); loadCopy(); },
       })));
       if (editBtn) editBtn.style.display = sources[index].collection ? '' : 'none';
-      if (copyBtn) copyBtn.style.display = sources[index].project ? '' : 'none';
+      if (copyBtn) copyBtn.style.display = sources[index].copy && !inCollection(sources[index].copy.name) ? '' : 'none';
     };
 
     function renderMarkdownInto(pane, content) {

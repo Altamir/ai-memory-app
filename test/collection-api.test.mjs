@@ -83,6 +83,21 @@ test('coleção começa vazia e os caminhos vêm do env', async () => {
   assert.equal(data.bundles.dir, skillsExports);
 });
 
+test('GET /api/collection/skills/names devolve os nomes da coleção', async () => {
+  const empty = await api('/api/collection/skills/names');
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.data.names, [], 'coleção vazia não devolve nomes');
+
+  // nome próprio: o teste seguinte importa `da-api` e espera `criada`
+  writeHarnessSkill('dos-nomes', 'conteúdo original');
+  const imp = await api('/api/collection/skills/import', { method: 'POST', body: { name: 'dos-nomes', harness: 'claude', kind: 'user' } });
+  assert.equal(imp.status, 200);
+
+  const after = await api('/api/collection/skills/names');
+  assert.equal(after.status, 200);
+  assert.ok(after.data.names.includes('dos-nomes'), 'skill importada aparece nos nomes');
+});
+
 function writeHarnessSkill(name, body) {
   const dir = path.join(home, '.claude/skills', name);
   fs.mkdirSync(dir, { recursive: true });

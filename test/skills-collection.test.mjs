@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   listCollectionSkills,
+  listCollectionSkillNames,
   getCollectionContent,
   listCollectionFiles,
   readCollectionFile,
@@ -62,6 +63,29 @@ test('coleção vazia lista zero skills e aponta a pasta', async () => {
   assert.equal(out.totals.skills, 0);
   assert.ok(out.harnesses.some((h) => h.id === 'claude' && h.userRoot.includes('.claude/skills')));
   assert.equal(path.basename(out.versionsRoot), '.versions');
+});
+
+test('listCollectionSkillNames devolve só os nomes e segue a regra de pertinência da coleção', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aim-col-names-'));
+  assert.deepEqual(listCollectionSkillNames({ dir }), [], 'coleção inexistente não quebra');
+
+  writeSkill(dir, 'normal', { description: 'padrão' });
+  // nome vem do frontmatter, não da pasta
+  fs.mkdirSync(path.join(dir, 'pasta-com-outro-nome'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'pasta-com-outro-nome/SKILL.md'), '---\nname: nome-do-frontmatter\ndescription: "x"\n---\n\ncorpo\n');
+  // sem `name:` no frontmatter: vale o nome da pasta
+  fs.mkdirSync(path.join(dir, 'sem-frontmatter'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'sem-frontmatter/SKILL.md'), 'sem frontmatter nenhum\n');
+  // fora da coleção: pasta sem SKILL.md e dot-dir (.versions guarda cópias)
+  fs.mkdirSync(path.join(dir, 'sem-skill-md'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'sem-skill-md/leia-me.md'), 'oito\n');
+  fs.mkdirSync(path.join(dir, '.versions/versao-antiga'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.versions/versao-antiga/SKILL.md'), '---\nname: versao-antiga\n---\n');
+
+  assert.deepEqual(
+    listCollectionSkillNames({ dir }).sort(),
+    ['nome-do-frontmatter', 'normal', 'sem-frontmatter'].sort(),
+  );
 });
 
 test('importToCollection copia pasta com recursos do harness para a coleção', async () => {
