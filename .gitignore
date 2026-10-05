@@ -2,6 +2,8 @@ node_modules/
 .sessions.json
 .servers.json
 .servers.json.bak
+.skills-git.json
+.skills-git.json.bak
 .import-state.json
 .import-state.json.bak
 .protected-pids.json

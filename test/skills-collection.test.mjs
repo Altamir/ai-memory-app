@@ -141,13 +141,13 @@ test('importToCollection rejeita nome inválido', async () => {
   await assert.rejects(() => importToCollection({ ...opts, name: '', harness: 'claude', kind: 'user' }));
 });
 
-test('saveCollectionVersion registra versão manual e content lê por versão', () => {
+test('saveCollectionVersion registra versão manual e content lê por versão', async () => {
   writeSkill(colDir, 'versionada', { body: 'v-atual' });
-  const first = saveCollectionVersion({ name: 'versionada', dir: colDir, note: 'primeira' });
+  const first = await saveCollectionVersion({ name: 'versionada', dir: colDir, note: 'primeira' });
   assert.equal(first.version, 1);
 
   fs.writeFileSync(path.join(colDir, 'versionada/SKILL.md'), '---\nname: versionada\ndescription: "d"\n---\n\nv-atual-2\n');
-  const second = saveCollectionVersion({ name: 'versionada', dir: colDir, note: 'segunda' });
+  const second = await saveCollectionVersion({ name: 'versionada', dir: colDir, note: 'segunda' });
   assert.equal(second.version, 2);
 
   const versions = listCollectionVersions({ name: 'versionada', dir: colDir });
@@ -162,15 +162,16 @@ test('saveCollectionVersion registra versão manual e content lê por versão', 
   assert.throws(() => getCollectionContent({ name: 'versionada', dir: colDir, version: 99 }), /não encontrada/);
 });
 
-test('restoreCollectionVersion volta o conteúdo e snapshota o estado anterior', () => {
-  const out = restoreCollectionVersion({ name: 'versionada', dir: colDir, version: 1 });
+test('restoreCollectionVersion volta o conteúdo e snapshota o estado anterior', async () => {
+  const out = await restoreCollectionVersion({ name: 'versionada', dir: colDir, version: 1 });
   assert.equal(out.restored, 1);
   assert.ok(Number.isInteger(out.snapshotId));
   assert.match(fs.readFileSync(path.join(colDir, 'versionada/SKILL.md'), 'utf8'), /v-atual\n/);
   const versions = listCollectionVersions({ name: 'versionada', dir: colDir });
   const note = versions.versions.find((v) => v.id === out.snapshotId);
   assert.match(note.note, /antes de restaurar v1/);
-  assert.throws(() => restoreCollectionVersion({ name: 'versionada', dir: colDir, version: 777 }));
+  // função async: o erro vem como promise rejeitada, não como throw síncrono
+  await assert.rejects(() => restoreCollectionVersion({ name: 'versionada', dir: colDir, version: 777 }));
 });
 
 test('skill excluída da coleção reaparece como recuperável e restore recria a pasta', async () => {
@@ -181,7 +182,7 @@ test('skill excluída da coleção reaparece como recuperável e restore recria 
   assert.ok(deleted.versions >= 3);
   assert.equal(list.skills.some((s) => s.name === 'versionada'), false);
 
-  restoreCollectionVersion({ name: 'versionada', dir: colDir, version: 1 });
+  await restoreCollectionVersion({ name: 'versionada', dir: colDir, version: 1 });
   const after = await listCollectionSkills(opts);
   assert.equal(after.skills.some((s) => s.name === 'versionada'), true);
   assert.equal(after.deleted.some((d) => d.name === 'versionada'), false);
@@ -282,7 +283,7 @@ test('scanSkillsBundle marca existentes/idênticas e importSkillsBundle versiona
   );
 });
 
-test('edição de arquivos: lista, lê, salva com snapshot e valida caminhos', () => {
+test('edição de arquivos: lista, lê, salva com snapshot e valida caminhos', async () => {
   const colE = path.join(root, 'colecao-e');
   writeSkill(colE, 'editavel', {
     body: 'original',
@@ -312,7 +313,7 @@ test('edição de arquivos: lista, lê, salva com snapshot e valida caminhos', (
 
   // salvar SKILL.md: snapshot do estado anterior + conteúdo novo no disco
   const versionsBefore = listCollectionVersions({ name: 'editavel', dir: colE }).versions.length;
-  const out = writeCollectionFile({ name: 'editavel', rel: 'SKILL.md', dir: colE, content: '---\nname: editavel\ndescription: "d"\n---\n\neditado' });
+  const out = await writeCollectionFile({ name: 'editavel', rel: 'SKILL.md', dir: colE, content: '---\nname: editavel\ndescription: "d"\n---\n\neditado' });
   assert.equal(out.saved, true);
   assert.ok(Number.isInteger(out.snapshotId));
   assert.equal(listCollectionVersions({ name: 'editavel', dir: colE }).versions.length, versionsBefore + 1);
@@ -321,20 +322,21 @@ test('edição de arquivos: lista, lê, salva com snapshot e valida caminhos', (
   assert.ok(inDisk.endsWith('\n')); // newline final normalizado
 
   // mesmo conteúdo: nada a fazer e nenhuma versão nova
-  const same = writeCollectionFile({ name: 'editavel', rel: 'SKILL.md', dir: colE, content: inDisk });
+  const same = await writeCollectionFile({ name: 'editavel', rel: 'SKILL.md', dir: colE, content: inDisk });
   assert.equal(same.saved, false);
   assert.equal(same.same, true);
   assert.equal(listCollectionVersions({ name: 'editavel', dir: colE }).versions.length, versionsBefore + 1);
 
   // arquivo novo também registra o estado anterior da skill
-  const novo = writeCollectionFile({ name: 'editavel', rel: 'references/g.md', dir: colE, content: '# guia\n' });
+  const novo = await writeCollectionFile({ name: 'editavel', rel: 'references/g.md', dir: colE, content: '# guia\n' });
   assert.equal(novo.saved, true);
   assert.ok(fs.existsSync(path.join(colE, 'editavel/references/g.md')));
 
   // validações: traversal, absoluto, NUL, skill inexistente
-  assert.throws(() => writeCollectionFile({ name: 'editavel', rel: '../escapa.md', dir: colE, content: 'x' }), /caminho/);
-  assert.throws(() => writeCollectionFile({ name: 'editavel', rel: '/etc/hosts', dir: colE, content: 'x' }), /caminho/);
-  assert.throws(() => writeCollectionFile({ name: 'editavel', rel: 'SKILL.md', dir: colE, content: 'a\0b' }), /nulos/);
+  // writeCollectionFile é async: o erro vem como promise rejeitada
+  await assert.rejects(() => writeCollectionFile({ name: 'editavel', rel: '../escapa.md', dir: colE, content: 'x' }), /caminho/);
+  await assert.rejects(() => writeCollectionFile({ name: 'editavel', rel: '/etc/hosts', dir: colE, content: 'x' }), /caminho/);
+  await assert.rejects(() => writeCollectionFile({ name: 'editavel', rel: 'SKILL.md', dir: colE, content: 'a\0b' }), /nulos/);
   assert.throws(() => readCollectionFile({ name: 'editavel', rel: '../../fora', dir: colE }), /caminho/);
   assert.throws(() => listCollectionFiles({ name: 'nao-existe', dir: colE }), /não está na coleção/);
 });

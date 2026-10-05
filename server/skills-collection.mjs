@@ -23,10 +23,12 @@ import {
 // (AIM_APP_SKILLS_DIR). Cada skill é um diretório `<nome>/SKILL.md` + recursos,
 // igual aos roots de harness — instalar copia a pasta inteira.
 //
-// Versionamento por snapshots (sem git): `<coleção>/.versions/<skill>/<id>/`
-// guarda cópias completas e `<skill>/index.json` guarda os metadados. Snapshot
-// automático antes de qualquer escrita que perca conteúdo (importar por cima,
-// restaurar, importar bundle divergente) e manual pelo painel.
+// Versionamento: a coleção é um repositório git (server/skills-git.mjs) e o
+// histórico é o do git — um commit por escrita que muda conteúdo. Onde o git
+// não está configurado, ou a máquina não tem git, cai para o modo antigo:
+// snapshots em `<coleção>/.versions/<skill>/<id>/`, com cópias completas e
+// `index.json`. Quem já tem versões gravadas continua com elas (o `.versions/`
+// fica no `.gitignore` e a tela mostra os dois históricos).
 //
 // Bundle de skills: .tar.gz com manifest.json + `skills/<nome>/...`, lido de
 // volta pelo painel para importar (mesma mecânica dos bundles de memórias).
@@ -92,37 +94,82 @@ function writeFiles(destDir, files, readContent) {
 
 // ---------- versionamento ----------
 
-function readVersionIndex(name, dir) {
+/** A coleção está em modo git? (repo existe e o binário funciona) */
+let gitModeCache = { dir: null, value: null };
+async function gitActive(dir) {
+  const root = path.resolve(dir || config.skillsDir);
+  if (gitModeCache.dir === root) return gitModeCache.value;
+  let value = false;
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(versionsRootOf(name, dir), 'index.json'), 'utf8'));
-    if (parsed && typeof parsed === 'object') {
-      return {
-        versions: Array.isArray(parsed.versions) ? parsed.versions : [],
-        nextId: Number.isInteger(parsed.nextId) ? parsed.nextId : parsed.versions.length + 1,
-      };
-    }
+    const g = await import('./skills-git.mjs');
+    value = g.isRepo(root);
   } catch {
-    // sem versões ainda
+    value = false;
   }
-  return { versions: [], nextId: 1 };
-}
-
-function writeVersionIndex(name, dir, index) {
-  const root = versionsRootOf(name, dir);
-  fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(path.join(root, 'index.json'), `${JSON.stringify(index, null, 2)}\n`);
+  gitModeCache = { dir: root, value };
+  return value;
 }
 
 /**
- * Snapshot do estado atual da skill da coleção. Copia todos os arquivos para
- * `.versions/<skill>/<id>/` e registra no index. Poda o histórico acima de
- * MAX_VERSIONS, removendo o mais antigo.
+ * Fecha o versionamento por git de uma escrita. Retorna null quando a coleção
+ * não é repo (ou o git falhou), e nesse caso quem chamou mantém o snapshot em
+ * disco. Falha de git NUNCA derruba a escrita: perder um commit é ruim, perder
+ * a edição é pior.
+ *
+ * É chamado DEPOIS da escrita, porque é o estado novo que precisa virar commit
+ * — o histórico do git guarda o que ficou, não o que estava antes (esse papel é
+ * do commit anterior, que a escrita anterior já criou).
  */
-export function snapshotSkill({ name, dir, note = null, source = 'manual' } = {}) {
+async function commitSkillChange({ name, dir, message, source }) {
+  let g;
+  try {
+    g = await import('./skills-git.mjs');
+  } catch {
+    return null; // módulo indisponível: segue com snapshot
+  }
+  if (!g.isRepo(dir)) return null;
+  try {
+    const out = await g.commitAll({ dir, message });
+    if (!out.committed) return null;
+    return {
+      git: { sha: out.sha, message: out.message, source: String(source || '').slice(0, 120) },
+    };
+  } catch (err) {
+    // registra o motivo sem interromper: a escrita já aconteceu
+    console.warn(`[skills-git] não commitei "${name}": ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Snapshot do estado atual da skill da coleção. Em modo git, delega para um
+ * commit; sem git, copia todos os arquivos para `.versions/<skill>/<id>/` e
+ * registra no index, podando o histórico acima de MAX_VERSIONS.
+ */
+export async function snapshotSkill({ name, dir, note = null, source = 'manual' } = {}) {
   const skillDir = skillDirOf(name, dir);
   if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
     throw new Error(`skill "${name}" não está na coleção (${skillDir})`);
   }
+
+  // modo git: o commit registra o estado atual e é o histórico de verdade
+  if (await gitActive(dir)) {
+    const message = note || `${source}: ${name}`;
+    const out = await commitSkillChange({ name, dir, message, source });
+    if (out) {
+      return {
+        id: out.git.sha,
+        git: out.git,
+        createdAt: new Date().toISOString(),
+        note: note || null,
+        source: String(source).slice(0, 120),
+        pruned: [],
+      };
+    }
+    // commit não aconteceu (árvore limpa ou git indisponível): segue para o
+    // snapshot em disco, que ainda dá rollback
+  }
+
   const files = inventory(skillDir);
   const skillMd = files.find((f) => f.rel === 'SKILL.md');
   const index = readVersionIndex(name, dir);
@@ -151,7 +198,29 @@ export function snapshotSkill({ name, dir, note = null, source = 'manual' } = {}
     pruned.push(oldest.id);
   }
   writeVersionIndex(name, dir, index);
-  return { ...entry, pruned };
+  return { ...entry, git: false, pruned };
+}
+
+/** Índice de snapshots em disco (`.versions/<skill>/index.json`). */
+function readVersionIndex(name, dir) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(versionsRootOf(name, dir), 'index.json'), 'utf8'));
+    if (parsed && typeof parsed === 'object') {
+      return {
+        versions: Array.isArray(parsed.versions) ? parsed.versions : [],
+        nextId: Number.isInteger(parsed.nextId) ? parsed.nextId : parsed.versions.length + 1,
+      };
+    }
+  } catch {
+    // sem versões ainda
+  }
+  return { versions: [], nextId: 1 };
+}
+
+function writeVersionIndex(name, dir, index) {
+  const root = versionsRootOf(name, dir);
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'index.json'), `${JSON.stringify(index, null, 2)}\n`);
 }
 
 /** Versões registradas de uma skill (o snapshot pode ter sido podado à mão). */
@@ -265,7 +334,7 @@ export function readCollectionFile({ name, rel, dir } = {}) {
  * escrever — o histórico nunca perde a versão de antes do edit. Conteúdo
  * idêntico não faz nada.
  */
-export function writeCollectionFile({ name, rel, content, note = null, dir } = {}) {
+export async function writeCollectionFile({ name, rel, content, note = null, dir } = {}) {
   const skillDir = assertSkillDir(name, dir);
   const { relPath, full } = safeRelInSkillDir(skillDir, rel);
   const text = String(content ?? '');
@@ -279,28 +348,49 @@ export function writeCollectionFile({ name, rel, content, note = null, dir } = {
       return { name: String(name), rel: relPath, saved: false, same: true, bytes };
     }
   }
-  const snapshot = snapshotSkill({ name, dir, note: note || `antes de editar ${relPath}`, source: 'antes de editar' });
+  // Sem git, o snapshot do estado anterior é o que salva o trabalho de hoje.
+  // Com git, o commit do estado novo é o histórico — o antigo já está no commit
+  // anterior, e é para lá que o "Restaurar" aponta.
+  const snapshot = (await gitActive(dir)) ? null : await snapshotSkill({ name, dir, note: note || `antes de editar ${relPath}`, source: 'antes de editar' });
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, normalized);
-  return { name: String(name), rel: relPath, saved: true, bytes, snapshotId: snapshot.id };
+  const committed = await commitSkillChange({ name, dir, message: note || `edita ${relPath}`, source: 'antes de editar' });
+  return {
+    name: String(name),
+    rel: relPath,
+    saved: true,
+    bytes,
+    snapshotId: snapshot?.id ?? null,
+    gitSha: committed?.git?.sha ?? null,
+  };
 }
 
 /**
- * Restaura uma versão: o estado atual vira snapshot ("antes de restaurar vN")
- * e a pasta da skill é substituída pelos arquivos da versão escolhida.
+ * Restaura uma versão em disco (`.versions/`): o estado atual vira snapshot
+ * ("antes de restaurar vN") e a pasta da skill é substituída pelos arquivos da
+ * versão escolhida. No modo git, o "Restaurar" da tela usa o histórico do git
+ * (rota `git/restore`) — este caminho continua existindo para as skills que já
+ * tinham snapshots.
  */
-export function restoreCollectionVersion({ name, version, dir } = {}) {
+export async function restoreCollectionVersion({ name, version, dir } = {}) {
   const skillDir = skillDirOf(name, dir);
   const vDir = path.join(versionsRootOf(name, dir), String(version));
   const files = inventory(vDir); // lança se a versão não existir
   if (!files.some((f) => f.rel === 'SKILL.md')) throw new Error(`versão ${version} de "${name}" não tem SKILL.md`);
   let snapshot = null;
   if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
-    snapshot = snapshotSkill({ name, dir, note: `antes de restaurar v${version}`, source: 'antes de restaurar' });
+    snapshot = await snapshotSkill({ name, dir, note: `antes de restaurar v${version}`, source: 'antes de restaurar' });
   }
   fs.rmSync(skillDir, { recursive: true, force: true });
   writeFiles(skillDir, files, (f) => fs.readFileSync(path.join(vDir, f.rel)));
-  return { name: String(name), restored: Number(version), files: files.length, snapshotId: snapshot?.id ?? null };
+  const committed = await commitSkillChange({ name, dir, message: `restaura versão v${version}`, source: 'antes de restaurar' });
+  return {
+    name: String(name),
+    restored: Number(version),
+    files: files.length,
+    snapshotId: snapshot?.id ?? null,
+    gitSha: committed?.git?.sha ?? null,
+  };
 }
 
 // ---------- coleção ----------
@@ -503,6 +593,9 @@ export async function importToCollection({ name, harness, kind, ws, dir, home, m
 
   const destFile = path.join(destDir, 'SKILL.md');
   const exists = fs.existsSync(destFile);
+  // no modo git o commit do conteúdo novo é o histórico; sem git, o snapshot
+  // do conteúdo antigo é o que salva a importação por cima
+  const gitMode = await gitActive(dir);
   let snapshot = null;
 
   if (sourceDir) {
@@ -510,7 +603,7 @@ export async function importToCollection({ name, harness, kind, ws, dir, home, m
       if (dirSignature(inventory(destDir)) === dirSignature(sourceFiles)) {
         return { name: String(name), action: 'igual', path: destFile, source: sourceLabel, skipped: true };
       }
-      snapshot = snapshotSkill({ name, dir, note: `antes de importar de ${sourceLabel}`, source: 'antes de importar' });
+      if (!gitMode) snapshot = await snapshotSkill({ name, dir, note: `antes de importar de ${sourceLabel}`, source: 'antes de importar' });
     }
     writeFiles(destDir, sourceFiles, (f) => fs.readFileSync(path.join(sourceDir, f.rel)));
   } else {
@@ -518,17 +611,24 @@ export async function importToCollection({ name, harness, kind, ws, dir, home, m
       const current = fs.readFileSync(destFile, 'utf8');
       const same = current === content || sha256(current.replace(/\r?\n/g, '\n')) === sha256(content.replace(/\r?\n/g, '\n'));
       if (same) return { name: String(name), action: 'igual', path: destFile, source: sourceLabel, skipped: true };
-      snapshot = snapshotSkill({ name, dir, note: `antes de importar de ${sourceLabel}`, source: 'antes de importar' });
+      if (!gitMode) snapshot = await snapshotSkill({ name, dir, note: `antes de importar de ${sourceLabel}`, source: 'antes de importar' });
     }
     writeFiles(destDir, [{ rel: 'SKILL.md', bytes: Buffer.byteLength(content), sha256: sha256(content) }], () => content);
   }
 
+  const committed = await commitSkillChange({
+    name,
+    dir,
+    message: `importa ${name} de ${sourceLabel}`,
+    source: 'antes de importar',
+  });
   return {
     name: String(name),
-    action: snapshot ? 'atualizada' : 'criada',
+    action: snapshot || committed ? 'atualizada' : 'criada',
     path: destFile,
     source: sourceLabel,
     snapshotId: snapshot?.id ?? null,
+    gitSha: committed?.git?.sha ?? null,
   };
 }
 
@@ -643,9 +743,31 @@ export async function importToCollectionBatch({ items, dir, home } = {}) {
   return { results, created, updated, same, errors };
 }
 
-/** Snapshot manual pedido pelo painel ("salvar versão"). */
-export function saveCollectionVersion({ name, note, dir } = {}) {  const entry = snapshotSkill({ name, dir, note, source: 'manual' });
-  return { name: String(name), version: entry.id, createdAt: entry.createdAt, files: entry.files, bytes: entry.bytes, pruned: entry.pruned };
+/**
+ * "Salvar versão agora": com git, um commit com a nota do usuário; sem git, um
+ * snapshot em disco. `version` é o id do snapshot ou o short sha do commit.
+ */
+export async function saveCollectionVersion({ name, note, dir } = {}) {
+  const entry = await snapshotSkill({ name, dir, note, source: 'manual' });
+  if (entry.git) {
+    return {
+      name: String(name),
+      version: entry.id,
+      git: true,
+      sha: entry.git.sha,
+      createdAt: entry.createdAt,
+      message: note || 'manual',
+    };
+  }
+  return {
+    name: String(name),
+    version: entry.id,
+    git: false,
+    createdAt: entry.createdAt,
+    files: entry.files,
+    bytes: entry.bytes,
+    pruned: entry.pruned,
+  };
 }
 
 /**
@@ -998,14 +1120,18 @@ export async function importSkillsBundle({ file, names, update = true, dir, expo
           skipped += 1;
           continue;
         }
-        const snapshot = snapshotSkill({ name, dir, note: 'antes de importar bundle', source: 'antes de importar bundle' });
-        snapshotId = snapshot.id;
+        if (!(await gitActive(dir))) {
+          const snapshot = await snapshotSkill({ name, dir, note: 'antes de importar bundle', source: 'antes de importar bundle' });
+          snapshotId = snapshot.id;
+        }
       }
       writeFiles(destDir, files, (f) => f.data);
+      const committed = await commitSkillChange({ name, dir, message: `importa ${name} de bundle`, source: 'antes de importar bundle' });
+      if (committed?.git?.sha) snapshotId = committed.git.sha;
       results.push({ name, action: snapshotId ? 'atualizada' : 'criada', files: files.length, snapshotId });
       if (snapshotId) updated += 1;
       else created += 1;
-      log('out', `${name}: ${snapshotId ? 'atualizada' : 'criada'} (${files.length} arquivo(s)${snapshotId ? `, versão ${snapshotId} do estado anterior` : ''})\n`);
+      log('out', `${name}: ${snapshotId ? 'atualizada' : 'criada'} (${files.length} arquivo(s)${snapshotId ? `, ${committed?.git ? 'commit' : 'versão'} ${String(snapshotId).slice(0, 8)}` : ''})\n`);
     } catch (err) {
       results.push({ name, action: 'erro', error: err.message });
       log('err', `${name}: ${err.message}\n`);

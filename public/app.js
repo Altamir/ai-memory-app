@@ -100,6 +100,12 @@ async function api(path, { method = 'GET', body } = {}) {
     const err = new Error(data?.error || `HTTP ${res.status}`);
     if (data?.detail) err.detail = data.detail;
     if (data?.needsForce) err.needsForce = true;
+    // gestor de repositório git: remote existente pede confirmação antes de trocar
+    if (data?.needsReplaceRemote) err.needsReplaceRemote = true;
+    if (data?.needsAuth) err.needsAuth = true;
+    // status cru do GitHub: é o que permite distinguir "já existe" (422) sem
+    // depender do texto da mensagem, que é traduzido
+    if (data?.ghStatus) err.ghStatus = data.ghStatus;
     throw err;
   }
   return data;
@@ -4241,6 +4247,9 @@ VIEWS.skills = async (main) => {
     // nomes das skills que já estão na coleção do gestor: é o que decide onde
     // o "copiar p/ Gestor" aparece (as abas do catálogo não sabem disso sozinhas)
     colNames: null,
+    // versionamento git da coleção: estado do repo/remote (null = ainda não perguntou)
+    git: null,
+    gitError: null,
   };
   const list = el('div', { class: 'stack' });
 
@@ -4332,6 +4341,10 @@ VIEWS.skills = async (main) => {
           state.tab = 'colecao';
           if (state.colData || state.colError) { renderControls(); renderList(); }
           else loadCollection();
+          // o estado do repo é o que desenha os chips e habilita Publicar/Buscar
+          loadGit({ silent: true }).then(() => {
+            if (state.tab === 'colecao') renderControls();
+          });
         },
       }),
     );
@@ -4344,9 +4357,20 @@ VIEWS.skills = async (main) => {
           btn({ size: 'sm', text: 'Importar do harness…', onClick: openImportFromHarness }),
           btn({ text: 'Exportar bundle…', size: 'sm', onClick: openExportBundle }),
           btn({ text: 'Importar bundle…', size: 'sm', onClick: openImportBundle }),
+          btn({
+            kind: 'primary',
+            text: 'Repositório…',
+            size: 'sm',
+            title: 'versionar a coleção com git e ligar um repositório privado do GitHub',
+            onClick: openGitSetup,
+          }),
+          btn({ text: 'Publicar', size: 'sm', title: 'commitar o que houver e enviar ao remoto', onClick: gitPublish }),
+          btn({ text: 'Buscar', size: 'sm', title: 'buscar do remoto e integrar (sem merge automático)', onClick: gitPull }),
+          btn({ text: 'Instalar do remoto…', size: 'sm', onClick: openInstallFromRemote }),
           btn({ text: 'Atualizar', size: 'sm', onClick: loadCollection }),
         ),
         colLogCard,
+        gitChips(),
         col
           ? el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
               el('span', { class: 'chip mono', text: col.dir }),
@@ -4616,6 +4640,413 @@ VIEWS.skills = async (main) => {
     });
   }
 
+  // ---------- versionamento git da coleção ----------
+
+  /** Estado do repo: branch, remote, pendências e se o git existe na máquina. */
+  async function loadGit({ silent = false } = {}) {
+    try {
+      state.git = await api('/api/collection/git/status');
+      state.gitError = null;
+    } catch (err) {
+      state.gitError = err.message;
+      if (!silent) toast(err.message, 'err');
+    }
+    return state.git;
+  }
+
+  /** Recarrega o git e a coleção (chips + cards mudam juntos). */
+  async function refreshGitAndCollection() {
+    await loadGit({ silent: true });
+    await loadCollection();
+    renderControls();
+  }
+
+  /** Chips de estado do repositório (visíveis na aba Coleção). */
+  function gitChips() {
+    const g = state.git;
+    if (state.gitError) return el('span', { class: 'chip chip-err', text: `git: ${state.gitError}` });
+    if (!g) return null;
+    if (!g.git?.ok) {
+      return el('span', { class: 'chip chip-warn', text: 'git não encontrado — versionamento por snapshots', title: 'sem git o gestor continua funcionando com os snapshots em .versions/' });
+    }
+    const out = [];
+    if (g.isRepo) {
+      out.push(el('span', { class: 'chip chip-ok', text: `repo: ${g.branch || '?'}` }));
+      if (g.remote) out.push(el('span', { class: 'chip', text: `remote: ${g.remote.replace(/^https:\/\/github\.com\//, '')}` }));
+      else out.push(el('span', { class: 'chip chip-warn', text: 'sem remote' }));
+      if (g.ahead) out.push(el('span', { class: 'chip chip-info', text: `↑${g.ahead} a publicar` }));
+      if (g.behind) out.push(el('span', { class: 'chip chip-warn', text: `↓${g.behind} a buscar` }));
+      const changed = (g.changed || []).length;
+      if (changed) out.push(el('span', { class: 'chip chip-warn', text: `${changed} alteração(ões) não commitada(s)` }));
+    } else {
+      out.push(el('span', { class: 'chip chip-warn', text: 'coleção sem repositório' }));
+    }
+    if (!g.config?.hasToken && g.isRepo) out.push(el('span', { class: 'chip chip-warn', text: 'sem token do GitHub' }));
+    return el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' }, ...out);
+  }
+
+  /** Publicar: commita o que houver e sobe ao remoto (log em painel). */
+  async function gitPublish() {
+    const g = state.git;
+    if (!g?.isRepo || !g.remote) {
+      toast('configure o repositório primeiro', 'err');
+      return openGitSetup();
+    }
+    try {
+      const started = await api('/api/collection/git/push', { method: 'POST' });
+      watchCollectionJob(started, 'publicado no remoto');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }
+
+  /** Buscar: fetch + ff-only. Nunca faz merge automático. */
+  async function gitPull() {
+    const g = state.git;
+    if (!g?.isRepo || !g.remote) {
+      toast('configure o repositório primeiro', 'err');
+      return openGitSetup();
+    }
+    try {
+      const started = await api('/api/collection/git/pull', { method: 'POST' });
+      watchCollectionJob(started, 'busca concluída');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }
+
+  /**
+   * Modal de configuração do repositório. Mostra o estado detectado e oferece
+   * SÓ o que faz sentido nele: quem já tem repo não é Obrigado a refazer nada,
+   * e um remote existente nunca é trocado sem confirmação.
+   */
+  // fecha de fora: o botão "já fiz, checar de novo" reabre o modal
+  let closeGitSetupModal = null;
+
+  async function openGitSetup({ reopen = false } = {}) {
+    if (reopen) closeGitSetupModal?.();
+    const g = await loadGit();
+    closeGitSetupModal = null; // reabrir não fecha o modal anterior por engano
+    const body = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando…' }));
+
+    const ownerInput = el('input', { class: 'field', placeholder: 'seu-usuario', autocomplete: 'off', value: g?.config?.github?.owner || (g?.config?.gh?.login || '') });
+    const repoInput = el('input', { class: 'field', placeholder: 'minhas-skills', autocomplete: 'off', value: g?.config?.github?.repo || '' });
+    const branchInput = el('input', { class: 'field', placeholder: 'main', autocomplete: 'off', value: g?.config?.branch || 'main' });
+    const tokenInput = el('input', {
+      class: 'field',
+      type: 'password',
+      placeholder: g?.config?.hasToken ? 'deixe em branco para manter o token gravado' : 'ghp_… (PAT com escopo repo)',
+      autocomplete: 'off',
+    });
+    const probeOut = el('div', { class: 'stack' });
+
+    const tokenOrCurrent = () => (tokenInput.value.trim() || undefined);
+
+    // --- escolha de credencial -------------------------------------------------
+    // gh autenticado é o padrão: não há nada a digitar. O campo de token só
+    // aparece para quem escolhe essa alternativa (ou quando não há gh). A escolha
+    // é enviada em `prefer`, e o token só vai junto quando essa opção está ativa.
+    const ghInfo = g?.config?.gh || {};
+    let prefer = g?.config?.credential === 'pat' ? 'pat' : 'gh';
+    if (prefer === 'gh' && !ghInfo.authenticated && !g?.config?.hasToken) prefer = 'none';
+
+    const patBox = el('div', { class: 'stack' });
+    const tokenField = el('div', { class: 'stack' },
+      el('div', { class: 'field-label', text: 'Token do GitHub (PAT)' }),
+      tokenInput,
+      el('div', { class: 'small muted', text: 'escopo "repo" (classic) ou "Administration: write" (fine-grained). Fica em .skills-git.json (0600, fora do git) e nunca é gravado no .git/config.' }),
+    );
+
+    const radioGh = el('input', { type: 'radio', name: 'git-cred', ...(prefer === 'gh' ? { checked: true } : {}) });
+    const radioPat = el('input', { type: 'radio', name: 'git-cred', ...(prefer === 'pat' ? { checked: true } : {}) });
+
+    const ghRow = el('label', { class: 'check', style: 'display:flex; gap:8px; align-items:flex-start; cursor:pointer' },
+      radioGh,
+      el('div', { class: 'stack', style: 'gap:2px' },
+        el('strong', { text: 'Usar o GitHub CLI (gh)' }),
+        ghInfo.authenticated
+          ? el('span', { class: 'small muted', text: `já autenticado como ${ghInfo.login} — nada a digitar` })
+          : el('span', { class: 'small muted', text: ghInfo.installed ? 'instalado, mas sem login' : 'não encontrado no PATH' }),
+      ),
+    );
+
+    const patRow = el('label', { class: 'check', style: 'display:flex; gap:8px; align-items:flex-start; cursor:pointer' },
+      radioPat,
+      el('div', { class: 'stack', style: 'gap:2px' },
+        el('strong', { text: 'Usar um token (PAT)' }),
+        el('span', { class: 'small muted', text: g?.config?.hasToken ? 'há um token gravado; deixe em branco para manter' : 'só se você não puder usar o gh' }),
+      ),
+    );
+
+    /** Alterna o campo de token conforme a escolha — só aparece em "pat". */
+    function renderCredChoice() {
+      const showPat = prefer === 'pat';
+      patBox.replaceChildren(...(showPat ? [tokenField] : []));
+    }
+
+    radioGh.addEventListener('change', () => { prefer = 'gh'; renderCredChoice(); });
+    radioPat.addEventListener('change', () => { prefer = 'pat'; renderCredChoice(); });
+
+    /** Sem gh autenticado e sem token: a ponte é entrar pelo navegador. */
+    const loginHint = el('div', { class: 'stack' });
+    async function renderLoginHint() {
+      if (ghInfo.authenticated || g?.config?.hasToken) return loginHint.replaceChildren();
+      try {
+        const hint = await api('/api/collection/git/gh-login', { method: 'POST' });
+        loginHint.replaceChildren(
+          el('div', { class: 'small muted', text: 'Nenhuma credencial ainda. A opção mais simples é entrar pelo navegador — sem token:' }),
+          el('div', { class: 'codeblock', text: hint.command }),
+          el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: 'Já fiz — checar de novo',
+            onclick: () => openGitSetup({ reopen: true }),
+          }),
+        );
+      } catch {
+        loginHint.replaceChildren();
+      }
+      return loginHint;
+    }
+
+    /** O token só é enviado quando "pat" está escolhido de fato. */
+    const credPayload = () => (prefer === 'pat' ? { token: tokenOrCurrent() } : {});
+
+    const probeBtn = btn({ text: 'Testar acesso…', size: 'sm', onClick: async () => {
+      probeOut.replaceChildren(el('div', { class: 'small muted', text: 'consultando o GitHub…' }));
+      try {
+        const r = await api('/api/collection/git/github-probe', {
+          method: 'POST',
+          body: { ...credPayload(), owner: ownerInput.value.trim(), repo: repoInput.value.trim() },
+        });
+        // sem credencial a API responde 200 com ok:false (não é erro de rede) —
+        // tratar como "falhou" evita mostrar "autenticado como undefined"
+        if (!r.ok) {
+          probeOut.replaceChildren(el('div', { class: 'chip chip-err', text: r.error || 'não foi possível validar a credencial' }));
+          return;
+        }
+        const lines = [
+          el('div', { class: 'chip chip-ok', text: `autenticado como ${r.login}` }),
+          r.credential ? el('div', { class: 'chip', text: r.credential === 'gh' ? 'via GitHub CLI' : 'via token' }) : null,
+        ].filter(Boolean);
+        if (r.scopes) lines.push(el('div', { class: 'small muted', text: `escopos: ${r.scopes}` }));
+        if (r.repo) {
+          // "não existe" não é erro quando a intenção é criar: é informação
+          lines.push(el('div', {
+            class: `chip ${r.repo.exists ? 'chip-ok' : 'chip-info'}`,
+            text: r.repo.exists
+              ? `repositório existe${r.repo.private ? ' (privado)' : ' (público)'}${r.repo.empty ? ', ainda vazio' : ''}`
+              : `"${r.repo.owner}/${r.repo.repo}" ainda não existe — será criado no próximo passo`,
+          }));
+        }
+        probeOut.replaceChildren(...lines);
+      } catch (err) {
+        probeOut.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+      }
+    } });
+
+    /** Caminho A: cria o repo privado no GitHub e liga tudo. */
+    function doCreate() {
+      const repo = repoInput.value.trim();
+      if (!repo) { toast('informe o nome do repositório', 'err'); return; }
+      const go = async () => {
+        try {
+          await api('/api/collection/git/github-create', {
+            method: 'POST',
+            body: { ...credPayload(), owner: ownerInput.value.trim(), repo, branch: branchInput.value.trim(), private: true },
+          });
+          await gitSetupConnect({ replaceRemote: false });
+          toast('repositório criado e ligado', 'ok');
+        } catch (err) {
+          // 422 = nome já existe: oferecer usar o existente em vez de dead-end
+          if (err.ghStatus === 422 || /already exists|já em uso|422/i.test(err.message)) {
+            confirmModal({
+              title: 'O repositório já existe',
+              message: `O GitHub já tem "${repo}". Quer ligar a coleção nele em vez de criar?`,
+              onConfirm: async () => {
+                try {
+                  await api('/api/collection/git/setup', {
+                    method: 'POST',
+                    body: { github: { owner: ownerInput.value.trim(), repo, branch: branchInput.value.trim() }, ...credPayload() },
+                  });
+                  closeFn?.();
+                  await refreshGitAndCollection();
+                  toast('repositório ligado', 'ok');
+                } catch (e2) { toast(e2.message, 'err'); }
+              },
+            });
+            return;
+          }
+          toast(err.message, 'err');
+        }
+      };
+      return go();
+    }
+
+    /** Caminho B: só liga o remote ao repo que já existe. */
+    async function gitSetupConnect({ replaceRemote = false } = {}) {
+      try {
+        const out = await api('/api/collection/git/setup', {
+          method: 'POST',
+          body: {
+            github: { owner: ownerInput.value.trim(), repo: repoInput.value.trim(), branch: branchInput.value.trim() },
+            ...credPayload(),
+            replaceRemote,
+          },
+        });
+        closeFn?.();
+        await refreshGitAndCollection();
+        return out;
+      } catch (err) {
+        // remote diferente sem confirmação: perguntar antes de trocar
+        if (err.needsReplaceRemote) {
+          confirmModal({
+            title: 'Trocar o remote?',
+            message: `${err.message}`,
+            word: 'trocar',
+            onConfirm: async () => {
+              try {
+                await api('/api/collection/git/setup', {
+                  method: 'POST',
+                  body: {
+                    github: { owner: ownerInput.value.trim(), repo: repoInput.value.trim(), branch: branchInput.value.trim() },
+                    ...credPayload(),
+                    replaceRemote: true,
+                  },
+                });
+                closeFn?.();
+                await refreshGitAndCollection();
+                toast('remote trocado', 'ok');
+              } catch (e2) { toast(e2.message, 'err'); }
+            },
+          });
+          return null;
+        }
+        toast(err.message, 'err');
+        return null;
+      }
+    }
+
+    const form = el('div', { class: 'stack' },
+      el('div', { class: 'field-label', text: 'Como entrar no GitHub' }),
+      ghRow,
+      patRow,
+      patBox,
+      loginHint,
+      el('div', { class: 'field-label', text: 'Repositório' }),
+      el('div', { class: 'row', style: 'gap:8px; flex-wrap:wrap' },
+        el('div', { class: 'field-label', text: 'Dono' }), ownerInput,
+        el('div', { class: 'field-label', text: 'Nome' }), repoInput,
+        el('div', { class: 'field-label', text: 'Branch' }), branchInput,
+      ),
+      // O dono pré-preenchido com o login já causou confusão: deixar claro que
+      // a sua conta cria no seu usuário e só uma organização vai para /orgs.
+      el('div', {
+        class: 'small muted',
+        text: ghInfo.authenticated
+          ? `${ghInfo.login} é a sua conta — o repositório nasce nela. Para criar numa organização, troque o Dono.`
+          : 'Deixe o Dono igual ao seu usuário para criar na sua conta, ou informe uma organização.',
+      }),
+      el('div', { class: 'row', style: 'gap:6px' },
+        btn({ size: 'sm', text: 'Testar acesso…', onClick: () => probeBtn.click() }),
+      ),
+      probeOut,
+    );
+    renderCredChoice();
+    renderLoginHint();
+
+    const stateLine = (() => {
+      if (!g?.git?.ok) return `git não está instalado (${g?.git?.error || 'desconhecido'}) — o gestor continua nos snapshots em disco.`;
+      const cred = ghInfo.authenticated
+        ? ` Entrando pelo GitHub CLI (${ghInfo.login}).`
+        : g?.config?.hasToken ? ' Usando o token gravado.' : '';
+      if (g.isRepo && g.remote) return `Já configurado: branch ${g.branch}, remote ${g.remote}.${cred} Abaixo só muda o que você editar.`;
+      if (g.isRepo) return `A coleção já é um repositório git, mas sem remote. Abaixo você liga um repositório do GitHub.${cred}`;
+      return `A coleção ainda não é um repositório git. Escolha criar um repositório novo no GitHub ou ligar a um que já existe.${cred}`;
+    })();
+
+    const createBtn = btn({ kind: 'primary', text: 'Criar repositório privado e ligar', onClick: doCreate });
+    const connectBtn = btn({ text: 'Ligar a um repositório existente', onClick: () => gitSetupConnect({ replaceRemote: false }) });
+
+    const saveBtnLabel = prefer === 'pat' ? 'Salvar token' : 'Salvar';
+    const actions = g?.isRepo && g.remote
+      ? [{ label: 'Fechar' }, btn({ text: saveBtnLabel, onClick: () => gitSetupConnect({ replaceRemote: false }) })]
+      : [{ label: 'Cancelar' }, connectBtn, createBtn];
+
+    const closeFn = modal({ title: 'Repositório da coleção (git)', wide: true, bodyNode: body, actions });
+    closeGitSetupModal = closeFn;
+    // replaceChildren não filtra null: o ternário que devolve null viraria o
+    // texto "null" na tela — o filtro explícito é o que evita isso
+    body.replaceChildren(...[
+      el('div', { class: 'small muted', text: stateLine }),
+      g?.insideRepo ? el('div', { class: 'chip chip-warn', text: `atenção: a coleção está dentro de outro repositório (${g.insideRepo})` }) : null,
+      form,
+    ].filter(Boolean));
+  }
+
+  /** Lista as skills que só existem no remoto e instala direto num harness. */
+  async function openInstallFromRemote() {
+    const g = state.git;
+    if (!g?.isRepo || !g.remote) { toast('configure o repositório primeiro', 'err'); return openGitSetup(); }
+    const body = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'buscando skills do remoto…' }));
+    modal({ title: 'Instalar do repositório remoto', wide: true, bodyNode: body, actions: [{ label: 'Fechar' }] });
+    try {
+      const data = await api('/api/collection/git/remote-skills');
+      if (data.error) {
+        body.replaceChildren(el('div', { class: 'chip chip-warn', text: data.error }));
+        return;
+      }
+      const local = new Set((state.colData?.skills || []).map((s) => s.name));
+      const only = data.skills.filter((s) => !local.has(s.name));
+      const rows = data.skills.map((s) => el('div', { class: 'imp-item' },
+        el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+          el('strong', { text: s.name }),
+          local.has(s.name) ? el('span', { class: 'small muted', text: 'já está na coleção' }) : el('span', { class: 'chip chip-info', text: 'só no remoto' }),
+        ),
+        btn({ size: 'sm', text: 'Instalar…', onClick: () => openRemoteInstall(s.name) }),
+      ));
+      body.replaceChildren(
+        el('div', { class: 'small muted', text: `ref ${data.ref} · ${data.skills.length} skill(s) no remoto, ${only.length} só lá.` }),
+        rows.length ? el('div', { class: 'stack', style: 'gap:6px; max-height:52vh; overflow:auto' }, ...rows) : el('div', { class: 'small muted', text: 'nenhuma skill no remoto' }),
+      );
+    } catch (err) {
+      body.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+    }
+  }
+
+  function openRemoteInstall(name) {
+    const targets = state.colData?.harnesses || [];
+    if (!targets.length) { toast('nenhum harness conhecido', 'err'); return; }
+    const sel = el('select', { class: 'field' }, targets.map((h) => el('option', { value: h.id, text: h.label })));
+    const warn = el('div', { class: 'small muted', text: 'se já existir no harness sem o marker gerenciado, vai pedir force' });
+    const installBtn = btn({ kind: 'primary', text: 'Instalar do remoto', onClick: async () => {
+      try {
+        const out = await api('/api/collection/git/install', { method: 'POST', body: { name, harness: sel.value, scope: 'global' } });
+        toast(`instalada em ${out.path}`, 'ok');
+      } catch (err) {
+        if (err.needsForce) {
+          confirmModal({
+            title: 'Sobrescrever?',
+            message: err.message,
+            word: 'sobrescrever',
+            onConfirm: async () => {
+              try {
+                const out = await api('/api/collection/git/install', { method: 'POST', body: { name, harness: sel.value, scope: 'global', force: true } });
+                toast(`instalada em ${out.path}`, 'ok');
+              } catch (e2) { toast(e2.message, 'err'); }
+            },
+          });
+          return;
+        }
+        toast(err.message, 'err');
+      }
+    } });
+    modal({
+      title: `Instalar "${name}" do remoto`,
+      bodyNode: el('div', { class: 'stack' }, el('div', { class: 'field-label', text: 'Harness de destino' }), sel, warn),
+      actions: [{ label: 'Cancelar' }, installBtn],
+    });
+  }
+
   function colSkillCard(skill) {
     return el('div', { class: 'card stack' },
       el('div', { class: 'row-between' },
@@ -4624,8 +5055,8 @@ VIEWS.skills = async (main) => {
           skill.versions ? el('span', { class: 'chip chip-info', text: `${skill.versions} versão(ões)` }) : null,
           el('span', { class: 'chip', text: `${skill.files} arquivo(s) · ${fmtBytes(skill.bytes) || '0 B'}` }),
           btn({ size: 'sm', text: 'Ver…', title: 'arquivos e recursos com preview renderizado', onClick: () => openCollectionView(skill) }),
-          btn({ size: 'sm', text: 'Editar…', title: 'editar o SKILL.md e arquivos de texto da skill (salvar cria uma versão do estado anterior)', onClick: () => openCollectionEditor(skill) }),
-          btn({ text: 'Versões…', size: 'sm', onClick: () => openVersions(skill) }),
+          btn({ size: 'sm', text: 'Editar…', title: 'editar o SKILL.md e arquivos de texto da skill (salvar cria um commit ou versão do estado anterior)', onClick: () => openCollectionEditor(skill) }),
+          btn({ text: state.git?.isRepo ? 'Histórico…' : 'Versões…', size: 'sm', title: state.git?.isRepo ? 'commits desta skill no git' : 'snapshots desta skill em .versions/', onClick: () => openVersions(skill) }),
           btn({ size: 'sm', text: 'Instalar…', onClick: () => openCollectionInstall(skill) }),
         ),
       ),
@@ -4656,6 +5087,18 @@ VIEWS.skills = async (main) => {
     const box = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando…' }));
     modal({ title: version ? `${name} · v${version} (SKILL.md)` : `${name} · SKILL.md da coleção`, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
     api(`/api/collection/skills/content?${q}`).then(({ content }) => {
+      box.replaceChildren(el('div', { class: 'codeblock', style: 'max-height:60vh; overflow:auto', text: content }));
+    }).catch((err) => {
+      box.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
+    });
+  }
+
+  /** Preview do SKILL.md de uma skill num commit do git ("Ver" no histórico). */
+  function previewCommit(name, sha) {
+    const q = new URLSearchParams({ name, sha });
+    const box = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando…' }));
+    modal({ title: `${name} · ${String(sha).slice(0, 8)} (SKILL.md)`, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
+    api(`/api/collection/git/show?${q}`).then(({ content }) => {
       box.replaceChildren(el('div', { class: 'codeblock', style: 'max-height:60vh; overflow:auto', text: content }));
     }).catch((err) => {
       box.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
@@ -4831,31 +5274,21 @@ VIEWS.skills = async (main) => {
     });
   }
 
+  /**
+   * Histórico da skill. Com a coleção em git, o histórico é o do git (commits
+   * com autor, data e mensagem, e "Restaurar" que traz o arquivo de volta).
+   * Sem git — ou para as skills que já tinham snapshots — o histórico antigo em
+   * `.versions/` continua listado abaixo.
+   */
   async function openVersions(skill) {
-    const box = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando versões…' }));
-    modal({ title: `Versões de "${skill.name}"`, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
+    const box = el('div', { class: 'stack' }, el('div', { class: 'small muted', text: 'carregando histórico…' }));
+    modal({ title: `Histórico de "${skill.name}"`, wide: true, bodyNode: box, actions: [{ label: 'Fechar' }] });
 
-    async function reload() {
-      let data;
-      try {
-        data = await api(`/api/collection/skills/versions?name=${encodeURIComponent(skill.name)}`);
-      } catch (err) {
-        box.replaceChildren(el('div', { class: 'chip chip-err', text: err.message }));
-        return;
-      }
-      const noteInput = el('input', { class: 'field', placeholder: 'nota da versão (opcional)', autocomplete: 'off' });
-      const saveBtn = btn({ kind: 'primary', size: 'sm', text: 'Salvar versão agora', onClick: async () => {
-          try {
-            const out = await api('/api/collection/skills/version', { method: 'POST', body: { name: skill.name, note: noteInput.value.trim() || null } });
-            toast(`versão ${out.version} salva`, 'ok');
-            loadCollection();
-            reload();
-          } catch (err) {
-            toast(err.message, 'err');
-          }
-        } });
+    const gitOn = () => Boolean(state.git?.isRepo && state.git?.git?.ok);
 
-      const rows = data.versions.map((v) => el('div', { class: 'imp-item' },
+    /** Linha do histórico em disco (.versions/<skill>/<id>/). */
+    function snapshotRows(versions, inCollection) {
+      const rows = versions.map((v) => el('div', { class: 'imp-item' },
         el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
           el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
             el('strong', { text: `v${v.id}` }),
@@ -4868,7 +5301,7 @@ VIEWS.skills = async (main) => {
           v.note ? el('div', { class: 'small muted', text: v.note }) : null,
         ),
         el('div', { class: 'row', style: 'gap:4px' },
-          btn({ size: 'sm', text: 'Ver', disabled: true, onClick: () => previewCollectionContent(skill.name, v.id) }),
+          btn({ size: 'sm', text: 'Ver', onClick: () => previewCollectionContent(skill.name, v.id) }),
           btn({ kind: 'secondary', size: 'sm', text: 'Restaurar', onClick: () => confirmModal({
               title: `Restaurar v${v.id} de "${skill.name}"`,
               message: `A pasta atual da coleção será substituída pelo conteúdo de v${v.id}. O estado atual é salvo antes como nova versão ("antes de restaurar").`,
@@ -4877,7 +5310,7 @@ VIEWS.skills = async (main) => {
                 try {
                   const out = await api('/api/collection/skills/restore', { method: 'POST', body: { name: skill.name, version: v.id } });
                   toast(`v${out.restored} restaurada (${out.files} arquivo(s)${out.snapshotId ? `, estado anterior salvo em v${out.snapshotId}` : ''})`, 'ok');
-                  loadCollection();
+                  await loadCollection();
                   reload();
                 } catch (err) {
                   toast(err.message, 'err');
@@ -4886,16 +5319,96 @@ VIEWS.skills = async (main) => {
           }),
         ),
       ));
+      return el('div', { class: 'stack', style: 'gap:6px' }, ...rows);
+    }
 
-      box.replaceChildren(
-        el('div', { class: 'small muted', text: data.inCollection
-          ? 'Snapshots vivem em .versions/ dentro da coleção. Importar por cima, restaurar e "Salvar versão" registram o estado atual antes de mudar.'
-          : 'Esta skill não está mais na coleção — restaurar uma versão recria a pasta.' }),
-        el('div', { class: 'row', style: 'flex-wrap:wrap' }, noteInput, saveBtn),
-        data.versions.length
-          ? el('div', { class: 'stack', style: 'gap:6px' }, ...rows)
-          : el('div', { class: 'small muted', text: 'nenhuma versão registrada ainda' }),
+    /** Linha de um commit do git. */
+    function commitRow(c, isFirst) {
+      return el('div', { class: 'imp-item' },
+        el('div', { class: 'stack', style: 'gap:2px; flex:1; min-width:0' },
+          el('div', { class: 'row', style: 'flex-wrap:wrap; gap:6px' },
+            el('strong', { class: 'mono', text: c.short }),
+            el('span', { class: 'chip', text: timeAgo(c.date) || new Date(c.date).toLocaleString() }),
+            isFirst ? el('span', { class: 'chip chip-ok', text: 'atual' }) : null,
+            el('span', { class: 'chip', text: c.author || '—' }),
+          ),
+          el('div', { class: 'small', text: c.message }),
+        ),
+        el('div', { class: 'row', style: 'gap:4px' },
+          btn({ size: 'sm', text: 'Ver', onClick: () => previewCommit(skill.name, c.sha) }),
+          isFirst ? null : btn({ kind: 'secondary', size: 'sm', text: 'Restaurar', onClick: () => confirmModal({
+              title: `Restaurar ${skill.name} de ${c.short}`,
+              message: `A pasta "${skill.name}" volta ao conteúdo do commit ${c.short} (${c.message}). O estado atual é preservado: isso cria um commit novo, não apaga o histórico.`,
+              word: 'restaurar',
+              onConfirm: async () => {
+                try {
+                  const out = await api('/api/collection/git/restore', { method: 'POST', body: { name: skill.name, sha: c.sha } });
+                  toast(out.committed ? `restaurado de ${c.short} (commit ${out.sha})` : 'o conteúdo já era esse — nada a mudar', 'ok');
+                  await refreshGitAndCollection();
+                  reload();
+                } catch (err) {
+                  toast(err.message, 'err');
+                }
+              } }),
+          }),
+        ),
       );
+    }
+
+    async function reload() {
+      const useGit = gitOn();
+      // com git o histórico é o de commits; sem git, o de snapshots
+      const [logData, snapData] = await Promise.all([
+        useGit ? api(`/api/collection/git/log?name=${encodeURIComponent(skill.name)}`).catch(() => null) : Promise.resolve(null),
+        api(`/api/collection/skills/versions?name=${encodeURIComponent(skill.name)}`).catch(() => null),
+      ]);
+      if (!logData && !snapData) {
+        box.replaceChildren(el('div', { class: 'chip chip-err', text: 'não consegui carregar o histórico' }));
+        return;
+      }
+
+      const noteInput = el('input', { class: 'field', placeholder: 'nota do commit (opcional)', autocomplete: 'off' });
+      const saveBtn = btn({ kind: 'primary', size: 'sm', text: useGit ? 'Commitar agora' : 'Salvar versão agora', onClick: async () => {
+          try {
+            const out = await api('/api/collection/skills/version', { method: 'POST', body: { name: skill.name, note: noteInput.value.trim() || null } });
+            toast(out.git ? `commit ${out.sha} criado` : `versão v${out.version} salva`, 'ok');
+            await refreshGitAndCollection();
+            reload();
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        } });
+
+      const parts = [el('div', { class: 'row', style: 'flex-wrap:wrap' }, noteInput, saveBtn)];
+
+      if (useGit) {
+        const commits = logData?.commits || [];
+        parts.push(el('div', {
+          class: 'small muted',
+          text: commits.length
+            ? 'Histórico em git: cada edição/importação/publicação é um commit. "Restaurar" traz a skill de volta para o estado daquele commit, criando um commit novo.'
+            : 'A coleção está em git mas esta skill ainda não tem commits.',
+        }));
+        parts.push(commits.length
+          ? el('div', { class: 'stack', style: 'gap:6px' }, ...commits.map((c, i) => commitRow(c, i === 0)))
+          : el('div', { class: 'small muted', text: 'nenhum commit ainda' }));
+      } else {
+        parts.push(el('div', {
+          class: 'small muted',
+          text: 'Sem git: os snapshots vivem em .versions/ dentro da coleção. Importar por cima, restaurar e "Salvar versão" registram o estado atual antes de mudar.',
+        }));
+        parts.push(snapData?.versions?.length
+          ? snapshotRows(snapData.versions, snapData.inCollection)
+          : el('div', { class: 'small muted', text: 'nenhuma versão registrada ainda' }));
+      }
+
+      // com git, os snapshots antigos continuam acessíveis (se existirem)
+      if (useGit && snapData?.versions?.length) {
+        parts.push(el('div', { class: 'field-label', style: 'margin-top:8px', text: 'snapshots antigos (antes do git)' }));
+        parts.push(snapshotRows(snapData.versions, snapData.inCollection));
+      }
+
+      box.replaceChildren(...parts.filter(Boolean));
     }
 
     await reload();
@@ -5027,7 +5540,10 @@ VIEWS.skills = async (main) => {
       if (j.status === 'running') return;
       clearInterval(watch);
       toast(j.status === 'ok' ? doneMsg : `operação terminou com ${j.status}`, j.status === 'ok' ? 'ok' : 'err');
-      loadCollection();
+      // recarrega a coleção E o estado do git: publicar/buscar muda os chips
+      await loadGit({ silent: true });
+      await loadCollection();
+      renderControls();
     }, 1000);
   }
 

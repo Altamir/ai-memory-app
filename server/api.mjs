@@ -20,6 +20,26 @@ import { setupStatus, cliRelease } from './setup-check.mjs';
 import { installCli, initClientDir, installHooks } from './cli-install.mjs';
 import { listHarnessMcp, previewHarnessMcp, applyHarnessMcp, applyHarnessMcpMany } from './harness-mcp.mjs';
 import { listCollectionSkills, listCollectionSkillNames, getCollectionContent, listCollectionFiles, readCollectionFile, writeCollectionFile, listCollectionVersions, importToCollection, importToCollectionBatch, listHarnessSkills, saveCollectionVersion, restoreCollectionVersion, installCollectionSkill, exportSkillsBundle, resolveSkillsBundlePath, scanSkillsBundle, importSkillsBundle } from './skills-collection.mjs';
+import {
+  probeGit,
+  detectState,
+  gitStatus,
+  ensureRepo,
+  setRemote,
+  githubRepoUrl,
+  commitAll,
+  listCommitsForSkill,
+  showCommitFile,
+  restoreCommit,
+  pushRemote,
+  fetchRemote,
+  pullFastForward,
+  listRemoteSkills,
+  installFromRemote,
+  insideOtherRepo,
+  resolveCredential,
+} from './skills-git.mjs';
+import { publicState as gitConfigState, saveGitHubConfig, currentToken as gitToken, githubProbe, githubCreateRepo, ghLoginHint } from './skills-git-config.mjs';
 import { expandTilde } from './config.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -722,7 +742,7 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/collection/skills/file') {
       const body = await readJsonBody(req);
       try {
-        return json(res, 200, writeCollectionFile({
+        return json(res, 200, await writeCollectionFile({
           name: String(body.name || ''),
           rel: String(body.rel || ''),
           content: typeof body.content === 'string' ? body.content : '',
@@ -771,7 +791,7 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/collection/skills/version') {
       const body = await readJsonBody(req);
       try {
-        return json(res, 200, saveCollectionVersion({ name: String(body.name || ''), note: body.note ? String(body.note) : null }));
+        return json(res, 200, await saveCollectionVersion({ name: String(body.name || ''), note: body.note ? String(body.note) : null }));
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
@@ -779,7 +799,7 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/collection/skills/restore') {
       const body = await readJsonBody(req);
       try {
-        return json(res, 200, restoreCollectionVersion({ name: String(body.name || ''), version: Number(body.version) }));
+        return json(res, 200, await restoreCollectionVersion({ name: String(body.name || ''), version: Number(body.version) }));
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
@@ -850,6 +870,218 @@ export async function handleApi(req, res, url) {
       });
       fs.createReadStream(target).pipe(res);
       return;
+    }
+
+    // ---- versionamento git da coleção ----
+    // credencial: gh autenticado > PAT gravado. gh primeiro porque é o
+    // caminho que a pessoa já configurou uma vez e esqueceu.
+    const gitCredential = () => resolveCredential({ prefer: 'auto', token: gitToken() });
+    // A coleção inteira é um repo git (server/skills-git.mjs). O token do GitHub
+    // fica no .skills-git.json (0600) e nunca volta para o cliente — a tela
+    // recebe só `hasToken`, como no gestor de servidores.
+    if (route === 'GET /api/collection/git/status') {
+      try {
+        const cfg = await gitConfigState();
+        const git = await probeGit();
+        // git ausente não é erro: o gestor continua nos snapshots em disco e a
+        // tela avisa que o histórico por commits não está disponível
+        const state = git.ok
+          ? await detectState(config.skillsDir, { configured: cfg.configured })
+          : { state: 'sem-config', isRepo: false, branch: null, remote: null, ahead: 0, behind: 0, changed: [] };
+        return json(res, 200, {
+          ...state,
+          git,
+          config: cfg,
+          insideRepo: state.insideRepo ?? insideOtherRepo(config.skillsDir),
+        });
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/gh-login') {
+      // ponte para quem não tem gh autenticado: mostra o comando exato (device
+      // flow, sem token) e re-checar o login. Não roda `gh auth login` aqui:
+      // exigiria TTY e abriria navegador no servidor.
+      try {
+        return json(res, 200, await ghLoginHint());
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/github-probe') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, await githubProbe({
+          token: body.token !== undefined ? String(body.token) : undefined,
+          owner: body.owner !== undefined ? String(body.owner) : undefined,
+          repo: body.repo !== undefined ? String(body.repo) : undefined,
+        }));
+      } catch (err) {
+        return json(res, err.code === 'NEEDS_AUTH' ? 409 : 400, { error: err.message, needsAuth: err.code === 'NEEDS_AUTH', ghStatus: err.status || null });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/github-create') {
+      const body = await readJsonBody(req);
+      try {
+        const created = await githubCreateRepo({
+          token: body.token !== undefined ? String(body.token) : undefined,
+          owner: body.owner ? String(body.owner) : '',
+          repo: String(body.repo || ''),
+          branch: body.branch ? String(body.branch) : 'main',
+          private: body.private !== false,
+        });
+        // já grava a config: o passo seguinte (setup) só liga o remote
+        const cfg = await saveGitHubConfig({
+          owner: created.owner,
+          repo: created.repo,
+          branch: created.branch,
+          token: body.token !== undefined ? String(body.token) : undefined,
+        });
+        return json(res, 201, { ...created, config: cfg });
+      } catch (err) {
+        return json(res, err.code === 'NEEDS_AUTH' ? 409 : 400, { error: err.message, needsAuth: err.code === 'NEEDS_AUTH', ghStatus: err.status || null });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/setup') {
+      const body = await readJsonBody(req);
+      // `replaceRemote` é explícito: sem ele, um remote que o usuário já
+      // configurou na mão nunca é trocado por baixo
+      try {
+        const git = await probeGit();
+        if (!git.ok) return json(res, 400, { error: `git não disponível: ${git.error}` });
+        const repo = await ensureRepo(config.skillsDir);
+        const status = await gitStatus(config.skillsDir);
+        let remote = null;
+
+        let targetUrl = '';
+        if (body.remoteUrl) {
+          targetUrl = String(body.remoteUrl).trim();
+        } else if (body.github) {
+          const cfg = await saveGitHubConfig({
+            owner: body.github.owner ? String(body.github.owner) : undefined,
+            repo: body.github.repo ? String(body.github.repo) : undefined,
+            branch: body.github.branch ? String(body.github.branch) : undefined,
+            token: body.token !== undefined ? String(body.token) : undefined,
+          });
+          targetUrl = githubRepoUrl(cfg.github).url;
+        }
+
+        if (targetUrl) {
+          if (status.hasRemote && status.remote !== targetUrl && body.replaceRemote !== true) {
+            return json(res, 409, {
+              error: `a coleção já tem o remote "${status.remote}" — confirme para trocar por "${targetUrl}"`,
+              needsReplaceRemote: true,
+              currentRemote: status.remote,
+            });
+          }
+          remote = status.remote === targetUrl ? { remote: targetUrl, replaced: false } : await setRemote(config.skillsDir, targetUrl);
+        }
+        return json(res, 200, { ok: true, repo, remote, config: await gitConfigState() });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/commit') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, await commitAll({
+          message: body.message ? String(body.message).slice(0, 300) : 'atualiza coleção',
+        }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    if (route === 'GET /api/collection/git/log') {
+      try {
+        return json(res, 200, await listCommitsForSkill({
+          name: url.searchParams.get('name') || '',
+          limit: url.searchParams.get('limit') || 50,
+        }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    if (route === 'GET /api/collection/git/show') {
+      try {
+        return json(res, 200, await showCommitFile({
+          name: url.searchParams.get('name') || '',
+          sha: url.searchParams.get('sha') || '',
+          rel: url.searchParams.get('rel') || 'SKILL.md',
+        }));
+      } catch (err) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/restore') {
+      const body = await readJsonBody(req);
+      try {
+        return json(res, 200, await restoreCommit({
+          name: String(body.name || ''),
+          sha: String(body.sha || ''),
+        }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    if (route === 'GET /api/collection/git/remote-skills') {
+      try {
+        const cred = await gitCredential();
+        return json(res, 200, await listRemoteSkills({ cred }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    if (route === 'POST /api/collection/git/install') {
+      const body = await readJsonBody(req);
+      try {
+        const out = await installFromRemote({
+          name: String(body.name || ''),
+          harness: String(body.harness || ''),
+          scope: body.scope === 'project' ? 'project' : 'global',
+          projectDir: body.projectDir ? String(body.projectDir) : undefined,
+          force: body.force === true,
+          cred: await gitCredential(),
+        });
+        return json(res, 200, out);
+      } catch (err) {
+        if (err.code === 'NEEDS_FORCE') return json(res, 409, { error: err.message, needsForce: true });
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    // push/fetch/pull são jobs: rede é lenta e o log precisa aparecer na tela
+    const gitJob = (label, run) => {
+      const job = createRunnerJob(label, { group: 'actions', run: async ({ log }) => run(log) });
+      return json(res, 201, { id: job.id });
+    };
+    if (route === 'POST /api/collection/git/push') {
+      return gitJob('publicar coleção', async (log) => {
+        const commit = await commitAll({ message: 'publica coleção' });
+        if (commit.committed) log('sys', `commit local ${commit.sha}\n`);
+        else log('sys', 'nada novo para commitar\n');
+        await pushRemote({ cred: await gitCredential(), log });
+      });
+    }
+    if (route === 'POST /api/collection/git/pull') {
+      return gitJob('buscar coleção', async (log) => {
+        const out = await pullFastForward({ cred: await gitCredential(), log });
+        log('sys', `integração concluída (branch ${out.branch})\n`);
+      });
+    }
+    if (route === 'POST /api/collection/git/fetch') {
+      return gitJob('buscar do remoto', async (log) => {
+        await fetchRemote({ cred: await gitCredential(), log });
+      });
     }
 
     // ---- jobs de manutenção ----
