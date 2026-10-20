@@ -124,24 +124,24 @@ test('CLI num lugar fora do PATH e do config é ignorada', async () => {
 
 test('destino inacessível oferece configure-server (mesmo com CLI ok)', async () => {
   // ativa um perfil apontando para uma porta morta: o gate é a SAÚDE do destino
-  const saved = saveServer({ name: 'Morto', url: 'http://127.0.0.1:1' });
+  const saved = await saveServer({ name: 'Morto', url: 'http://127.0.0.1:1' });
   const id = saved.servers.find((s) => s.name === 'Morto').id;
-  activateServer(id);
+  await activateServer(id);
   try {
     const s = await setupStatus();
     assert.equal(s.server.ok, false);
     assert.ok(s.actions.some((a) => a.id === 'configure-server'), JSON.stringify(s.actions));
   } finally {
-    activateServer('local');
-    deleteServer(id);
+    await activateServer('local');
+    await deleteServer(id);
   }
 });
 
 test('o erro do servidor é curto e não vaza stack', async () => {
   // destino morto: é o único cenário em que o diagnóstico carrega um error
-  const saved = saveServer({ name: 'Morto err', url: 'http://127.0.0.1:1' });
+  const saved = await saveServer({ name: 'Morto err', url: 'http://127.0.0.1:1' });
   const id = saved.servers.find((s) => s.name === 'Morto err').id;
-  activateServer(id);
+  await activateServer(id);
   try {
     const s = await setupStatus();
     assert.equal(s.server.ok, false);
@@ -149,8 +149,8 @@ test('o erro do servidor é curto e não vaza stack', async () => {
     assert.ok(!s.server.error.includes('\n'), s.server.error);
     assert.ok(s.server.error.length <= 200);
   } finally {
-    activateServer('local');
-    deleteServer(id);
+    await activateServer('local');
+    await deleteServer(id);
   }
 });
 
@@ -196,16 +196,16 @@ test('o diagnóstico traz onde ficam a CLI e os dados locais (para o dashboard)'
   assert.equal(s.paths.storeDirWiki, false);
 });
 
-test('saveServer ainda funciona depois do diagnóstico (o caminho offered é real)', () => {
-  const out = saveServer({ name: 'VPS', url: 'https://vps.local', token: 't' });
+test('saveServer ainda funciona depois do diagnóstico (o caminho offered é real)', async () => {
+  const out = await saveServer({ name: 'VPS', url: 'https://vps.local', token: 't' });
   const id = out.servers.find((s) => s.name === 'VPS').id;
   assert.ok(id);
-  deleteServer(id);
+  await deleteServer(id);
 });
 
 test('setActiveBin realinha o bin do ambiente sem criar perfil fantasma', async () => {
   // parte limpa: testes anteriores podem ter deixado perfis no mesmo arquivo
-  for (const s of listServers().servers) deleteServer(s.id);
+  for (const s of listServers().servers) await deleteServer(s.id);
   assert.equal(listServers().servers.length, 0);
 
   const p = fakeCli(path.join(home, 'cli-achada'), '2.5.2');
@@ -227,8 +227,8 @@ test('regressão review#3: ambiente escondido + destino saudável NÃO é firstR
   // cenário do review: usuário removeu o servidor do ambiente da lista (hideEnv),
   // não tem outros cadastros, mas o destino implícito responde — o wizard não
   // pode reabrir em todo boot só porque a lista visível está vazia
-  for (const s of listServers().servers) deleteServer(s.id);
-  deleteServer('local'); // esconde o ambiente da lista
+  for (const s of listServers().servers) await deleteServer(s.id);
+  await deleteServer('local'); // esconde o ambiente da lista
   assert.equal(listServers().servers.length, 0);
 
   const p = fakeCli(path.dirname(config.bin), '2.5.2');
@@ -239,21 +239,21 @@ test('regressão review#3: ambiente escondido + destino saudável NÃO é firstR
     assert.equal(s.firstRun, false, 'wizard não reabre com destino saudável');
   } finally {
     fs.rmSync(p, { force: true });
-    restoreEnvServer();
+    await restoreEnvServer();
   }
 });
 
-test('regressão review#5: editar sem token preserva o gravado; limpar é explícito', () => {
-  const saved = saveServer({ name: 'ComToken', url: 'https://ct.local', token: 'token-importante' });
+test('regressão review#5: editar sem token preserva o gravado; limpar é explícito', async () => {
+  const saved = await saveServer({ name: 'ComToken', url: 'https://ct.local', token: 'token-importante' });
   const id = saved.servers.find((s) => s.name === 'ComToken').id;
 
   // edita nome SEM a chave token: preserva
-  const edited = saveServer({ id, name: 'ComToken renomeado', url: 'https://ct.local' });
+  const edited = await saveServer({ id, name: 'ComToken renomeado', url: 'https://ct.local' });
   assert.equal(edited.servers.find((s) => s.id === id).hasToken, true, 'edição sem token apagou o gravado');
 
   // edita com token '' explícito: limpa
-  const cleared = saveServer({ id, name: 'ComToken renomeado', url: 'https://ct.local', token: '' });
+  const cleared = await saveServer({ id, name: 'ComToken renomeado', url: 'https://ct.local', token: '' });
   assert.equal(cleared.servers.find((s) => s.id === id).hasToken, false);
 
-  deleteServer(id);
+  await deleteServer(id);
 });

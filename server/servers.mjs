@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { config } from './config.mjs';
 import { callTool } from './mcp.mjs';
 import { runCliJson } from './cli.mjs';
+import { writeShellEnv, removeShellEnv, shellEnvStatus } from './shell-env.mjs';
+import { syncCliProfile, removeCliProfile } from './cli-profiles.mjs';
 
 // Perfis de servidor do ai-memory: cada um aponta para um servidor (URL), um
 // binário de CLI e um data-dir de cliente — de onde sai o auth-token daquele
@@ -83,13 +85,19 @@ function load() {
   try {
     parsed = JSON.parse(fs.readFileSync(serversFile(), 'utf8'));
   } catch {
-    return { version: 1, active: LOCAL_ID, hideEnv: false, servers: [] };
+    return { version: 1, active: LOCAL_ID, hideEnv: false, applied: null, servers: [] };
   }
   const list = Array.isArray(parsed?.servers) ? parsed.servers : [];
   return {
     version: 1,
     active: typeof parsed?.active === 'string' ? parsed.active : LOCAL_ID,
     hideEnv: parsed?.hideEnv === true,
+    // último perfil espelhado para fora do painel (hooks + shell). Guardar é o que
+    // permite reverter depois de um restart — o slug sozinho não basta, porque
+    // o token do perfil vive no auth-tokens/<slug> da CLI.
+    applied: parsed?.applied && typeof parsed.applied === 'object'
+      ? { name: String(parsed.applied.name || ''), url: String(parsed.applied.url || ''), slug: String(parsed.applied.slug || '') }
+      : null,
     servers: list.filter((s) => s && typeof s === 'object').map((s) => sanitize(s)),
   };
 }
@@ -104,6 +112,7 @@ function save(state) {
     version: 1,
     active: state.active,
     hideEnv: state.hideEnv === true,
+    applied: state.applied || null,
     servers: state.servers,
   }, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
@@ -158,6 +167,43 @@ function tokenFor(profile) {
   }
 }
 
+/**
+ * Espelha o destino escolhido fora do painel: registra o perfil na CLI (para os
+ * hooks rotearem) e grava o bloco de env nos rc's (para o `ai-memory run` da
+ * linha de comando). Feito separado do save porque é o passo que toca a máquina
+ * do usuário fora do app — por isso só roda quando a tela pede (applyShell).
+ *
+ * Nunca derruba o save: o destino do painel já está gravado, e uma CLI ausente
+ * ou antiga só significa que o shell não foi configurado. O que deu errado
+ * volta na resposta para a tela mostrar.
+ */
+async function applyToMachine(profile) {
+  const token = tokenFor(profile);
+  const [shell, cli] = await Promise.all([
+    Promise.resolve().then(() => writeShellEnv({ url: profile.url, token })),
+    syncCliProfile({ name: profile.name, url: profile.url, token, dataDir: profile.dataDir, bin: profile.bin }),
+  ]);
+  // o que foi aplicado fica no .servers.json: sem isso, reverter não saberia o
+  // slug do perfil para dar `server remove`, e o token órfão ficaria na máquina
+  state.applied = cli.ok && !cli.skipped
+    ? { name: profile.name, url: profile.url, slug: cli.slug }
+    : null;
+  save(state);
+  return { applied: { shell, cli }, ok: shell.ok && cli.ok };
+}
+
+/** Desfaz applyToMachine — voltar ao ambiente devolve a CLI ao default local. */
+async function revertFromMachine() {
+  const applied = state.applied;
+  const [shell, cli] = await Promise.all([
+    Promise.resolve().then(() => removeShellEnv()),
+    applied ? removeCliProfile({ name: applied.name, url: applied.url }) : Promise.resolve({ ok: true, skipped: true }),
+  ]);
+  state.applied = null;
+  save(state);
+  return { removed: { shell, cli }, ok: shell.ok && cli.ok };
+}
+
 function applyProfile(profile) {
   config.serverUrl = profile.url;
   config.bin = profile.bin;
@@ -193,6 +239,13 @@ function describe(profile) {
       hidden: Boolean(profile.env && envHidden(state)),
     },
     servers: profiles(),
+    // o espelhamento para fora do painel (perfil na CLI + bloco de env no shell),
+    // lido do disco: a tela mostra se o `ai-memory run` do terminal já aponta
+    // para cá, e se está apontando para outro lugar
+    machine: {
+      cliProfile: state.applied,
+      shell: shellEnvStatus(),
+    },
   };
 }
 
@@ -213,7 +266,7 @@ export function isEnvServerActive() {
   return state.active === LOCAL_ID;
 }
 
-export function saveServer(input) {
+export async function saveServer(input) {
   // o perfil do ambiente não é uma entrada da lista: ele é derivado do processo,
   // então "editar" ele não tem onde gravar
   if (String(input?.id || '') === LOCAL_ID) throw new Error('o perfil do ambiente não pode ser editado');
@@ -230,16 +283,37 @@ export function saveServer(input) {
   // editar o perfil já ativo tem que valer na hora, sem reiniciar
   const stored = state.servers.find((s) => s.id === draft.id);
   if (draft.id === state.active) applyProfile(stored || draft);
-  return describe(findProfile(state.active) || envProfile());
+  const described = describe(findProfile(state.active) || envProfile());
+  // applyShell significa "este destino passa a valer na CLI e no shell" — e o
+  // alvo disso é o painel inteiro, não o perfil recém-criado ainda inativo. Por
+  // isso aplicar implica ativar: salvar a VPS com a caixa marcada e o painel
+  // continuar no ambiente seria exatamente o bug que a tela promete evitar.
+  if (input?.applyShell && draft.id !== state.active) {
+    const on = await activateServer(draft.id);
+    described.active = on.active;
+    described.servers = on.servers;
+    described.machine = on.machine;
+  }
+  if (input?.applyShell) {
+    const machine = await applyToMachine(stored || draft);
+    if (!machine.ok && state.active !== LOCAL_ID) await activateServer(state.active);
+    described.applied = machine.applied;
+  }
+  return described;
 }
 
-export function activateServer(id) {
+export async function activateServer(id) {
   const profile = findProfile(String(id || ''));
   if (!profile) throw new Error('servidor não encontrado');
   state.active = profile.id;
   save(state);
   applyProfile(profile);
-  return describe(profile);
+  const described = describe(profile);
+  if (profile.env) {
+    // voltar ao ambiente desfaz o espelhamento: a CLI e o shell voltam ao default
+    if (state.applied) described.removed = (await revertFromMachine()).removed;
+  }
+  return described;
 }
 
 /**
@@ -247,10 +321,12 @@ export function activateServer(id) {
  * seria irreversível pela tela: o destino continuaria funcionando (ele é
  * derivado do env) mas sumiria da lista sem volta.
  */
-export function restoreEnvServer() {
+export async function restoreEnvServer() {
   state.hideEnv = false;
   save(state);
-  return describe(findProfile(state.active) || envProfile());
+  const described = describe(findProfile(state.active) || envProfile());
+  if (state.applied) described.removed = (await revertFromMachine()).removed;
+  return described;
 }
 
 /**
@@ -280,17 +356,23 @@ export function setActiveBin(bin) {
   return describe(findProfile(state.active) || envProfile());
 }
 
-export function deleteServer(id) {
+export async function deleteServer(id) {
   const target = String(id || '');
+  let removed;
 
   if (target === LOCAL_ID) {
     // o ambiente sai da lista, mas continua sendo o destino implícito: sem ele o
     // painel ficaria sem servidor para onde falar
     state.hideEnv = true;
     // se for o ativo, volta para ele agora (a lista pode ter outros)
-    if (state.active === LOCAL_ID) applyProfile(envProfile());
+    if (state.active === LOCAL_ID) {
+      applyProfile(envProfile());
+      if (state.applied) removed = (await revertFromMachine()).removed;
+    }
     save(state);
-    return describe(findProfile(state.active) || envProfile());
+    const described = describe(findProfile(state.active) || envProfile());
+    if (removed) described.removed = removed;
+    return described;
   }
 
   const i = state.servers.findIndex((s) => s.id === target);
@@ -300,9 +382,12 @@ export function deleteServer(id) {
   if (state.active === target) {
     state.active = LOCAL_ID;
     applyProfile(envProfile());
+    if (state.applied) removed = (await revertFromMachine()).removed;
   }
   save(state);
-  return describe(findProfile(state.active) || envProfile());
+  const described = describe(findProfile(state.active) || envProfile());
+  if (removed) described.removed = removed;
+  return described;
 }
 
 /**

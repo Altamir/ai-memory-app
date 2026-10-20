@@ -661,8 +661,12 @@ async function openServerManager() {
     const doRemove = async (s) => {
       try {
         data = await api(`/api/servers/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
-        toast('servidor removido', 'ok');
+        const rev = data.removed;
+        toast(rev
+          ? `servidor removido · bloco do shell removido (${rev.shell.files.join(', ') || 'nenhum arquivo'})`
+          : 'servidor removido', 'ok');
         renderList();
+        renderForm();
       } catch (err) {
         toast(err.message, 'err');
       }
@@ -704,7 +708,10 @@ async function openServerManager() {
             : btn({ kind: 'primary', size: 'sm', text: 'Conectar', onClick: async () => {
                   try {
                     data = await api('/api/servers/activate', { method: 'POST', body: { id: s.id } });
-                    toast(`conectado em ${s.name}`, 'ok');
+                    const rev = data.removed;
+                    toast(rev
+                      ? `conectado em ${s.name} · espelhamento desfeito (perfil da CLI removido)`
+                      : `conectado em ${s.name}`, 'ok');
                     close();
                     refreshServerChip();
                     route();
@@ -764,6 +771,10 @@ async function openServerManager() {
     tokenInput.placeholder = s.hasToken
       ? 'deixe em branco para manter o token gravado'
       : 'token (opcional — senão usa o data-dir)';
+    // já espelhado? o default segue o que está valendo agora, para não repetir
+    // a confirmação à toa numa edição que não mexe no destino
+    form.applyShell = data?.machine?.cliProfile?.url === s.url;
+    applyShellCheck.checked = form.applyShell;
     title.textContent = 'Editar servidor';
     saveBtn.textContent = 'Salvar';
     renderForm();
@@ -772,12 +783,14 @@ async function openServerManager() {
   function clearForm() {
     form.id = null;
     form.clearToken = false;
+    form.applyShell = true;
     nameInput.value = '';
     urlInput.value = '';
     dataDirInput.value = '';
     binInput.value = '';
     tokenInput.value = '';
     tokenInput.placeholder = 'token (opcional — senão usa o data-dir)';
+    applyShellCheck.checked = true;
     title.textContent = 'Adicionar servidor';
     saveBtn.textContent = 'Adicionar';
     renderForm();
@@ -794,6 +807,20 @@ async function openServerManager() {
   const clearTokenLabel = el('label', { class: 'check', style: 'gap:4px' }, clearTokenCheck, 'limpar token gravado');
   const probeOut = el('div', { class: 'small muted' });
 
+  // Espelhar o destino para fora do painel: perfil na CLI (hooks) + bloco de env
+  // nos rc's (é o que faz `ai-memory run <harness>` funcionar no terminal — em
+  // 2.5.x o run não resolve perfil, só env). Marcado por padrão num servidor
+  // remoto porque é aí que a CLI da linha de comando mais sofre sem isso.
+  const applyShellCheck = el('input', { type: 'checkbox' });
+  applyShellCheck.addEventListener('change', () => { form.applyShell = applyShellCheck.checked; });
+  const applyShellLabel = el('label', { class: 'check', style: 'gap:6px; align-items:flex-start' },
+    applyShellCheck,
+    el('span', { class: 'stack', style: 'gap:2px' },
+      el('strong', { text: 'Aplicar na CLI e no shell' }),
+      el('span', { class: 'small muted', text: 'Registra este servidor como perfil da CLI (hooks capturam nele) e grava AI_MEMORY_SERVER_URL/AI_MEMORY_AUTH_TOKEN num bloco gerenciado do .zshrc/.bashrc, para o `ai-memory run` do terminal falar com ele. O token fica em texto plano no rc — vale para terminais abertos depois disso.' }),
+    ),
+  );
+
   const saveBtn = btn({ size: 'sm', text: 'Adicionar' });
   const probeBtn = btn({ size: 'sm', text: 'Testar conexão' });
   const resetBtn = btn({ size: 'sm', text: 'Limpar' });
@@ -808,9 +835,40 @@ async function openServerManager() {
       el('label', { class: 'field-label' }, 'Binário da CLI', binInput),
       el('label', { class: 'field-label' }, 'Token', tokenInput),
       form.id && form.hasToken ? clearTokenLabel : null,
+      applyShellLabel,
       el('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' }, saveBtn, probeBtn, resetBtn),
       probeOut,
+      machineLine(),
     );
+  }
+
+  /** Estado do espelhamento para fora do painel (lido do disco pelo servidor). */
+  function machineLine() {
+    const m = data?.machine;
+    if (!m) return null;
+    const shell = m.shell?.applied
+      ? `shell: ${m.shell.files.map((f) => f.file).join(', ')} → ${m.shell.files[0].url}`
+      : 'shell: não configurado';
+    const cli = m.cliProfile
+      ? `perfil da CLI: ${m.cliProfile.slug}`
+      : 'perfil da CLI: não registrado';
+    return el('div', { class: 'small muted', style: 'margin-top:2px' },
+      el('div', { class: 'mono', text: shell }),
+      el('div', { class: 'mono', text: cli }),
+      el('div', { text: 'É o que faz o `ai-memory run` do terminal e a captura dos hooks apontarem para cá. Voltar ao servidor do ambiente ou remover o cadastro desfaz.' }),
+    );
+  }
+
+  /** Traduz o retorno do apply em texto para o toast (o painel não mostra segredo). */
+  function appliedNote(out) {
+    if (!out?.applied) return '';
+    const { shell, cli } = out.applied;
+    const parts = [];
+    if (shell?.files?.length) parts.push(`shell: ${shell.files.join(', ')}`);
+    else if (shell?.errors?.length) parts.push(`shell falhou (${shell.errors.join('; ')})`);
+    if (cli?.ok) parts.push(`perfil da CLI: ${cli.slug}`);
+    else if (cli?.note) parts.push(`perfil da CLI não registrado (${cli.note})`);
+    return parts.join(' · ');
   }
 
   const collect = () => {
@@ -829,18 +887,33 @@ async function openServerManager() {
     };
   };
 
+  const doSave = async (payload) => {
+    const out = await api('/api/servers', { method: 'POST', body: payload });
+    data = out;
+    clearForm();
+    renderList();
+    renderForm();
+    const note = appliedNote(out);
+    toast(note ? `servidor salvo · ${note}` : 'servidor salvo', 'ok');
+    probeOut.textContent = note;
+  };
+
   saveBtn.addEventListener('click', async () => {
     const payload = collect();
     if (!payload.url) return toast('informe a URL do servidor', 'err');
-    try {
-      const out = await api('/api/servers', { method: 'POST', body: payload });
-      data = out;
-      toast('servidor salvo', 'ok');
-      clearForm();
-      renderList();
-    } catch (err) {
-      toast(err.message, 'err');
-    }
+    if (!form.applyShell) return doSave(payload);
+    // escreve fora do painel (rc's da máquina) — confirmar antes
+    confirmModal({
+      title: 'Aplicar este servidor na CLI e no shell?',
+      message: `Vai gravar um bloco gerenciado (# >>> ai-memory-app >>>) em .zshrc e .bashrc com AI_MEMORY_SERVER_URL e AI_MEMORY_AUTH_TOKEN apontando para ${payload.url}, e registrar o perfil na CLI para os hooks. O token fica em texto plano nesses arquivos, e vale para terminais abertos depois disso. Os arquivos são copiados antes (.bak-aimapp-*).`,
+      onConfirm: async () => {
+        try {
+          await doSave({ ...payload, applyShell: true });
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      },
+    });
   });
 
   probeBtn.addEventListener('click', async () => {

@@ -257,7 +257,7 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/servers') {
       const body = await readJsonBody(req);
       try {
-        return json(res, 200, saveServer({ ...body, id: body.id || undefined }));
+        return json(res, 200, await saveServer({ ...body, id: body.id || undefined }));
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
@@ -265,7 +265,7 @@ export async function handleApi(req, res, url) {
     if (route === 'POST /api/servers/activate') {
       const body = await readJsonBody(req);
       try {
-        return json(res, 200, activateServer(body.id));
+        return json(res, 200, await activateServer(body.id));
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
@@ -282,7 +282,7 @@ export async function handleApi(req, res, url) {
       const m = pathname.match(/^\/api\/servers\/([\w-]+)$/);
       if (m && method === 'DELETE') {
         try {
-          return json(res, 200, deleteServer(m[1]));
+          return json(res, 200, await deleteServer(m[1]));
         } catch (err) {
           return json(res, 400, { error: err.message });
         }
@@ -290,7 +290,7 @@ export async function handleApi(req, res, url) {
       // restaurar o ambiente removido (id estável, fora da lista de cadastrados)
       if (m && method === 'POST' && m[1] === 'env') {
         try {
-          return json(res, 200, restoreEnvServer());
+          return json(res, 200, await restoreEnvServer());
         } catch (err) {
           return json(res, 400, { error: err.message });
         }

@@ -133,9 +133,9 @@ test('a CLI grava um backup antes de mexer no arquivo', { skip: !CLI_AVAILABLE &
 });
 
 test('o destino segue o perfil ativo, não o do ambiente', { skip: !CLI_AVAILABLE && 'cli do ai-memory não instalada nesta máquina' }, async () => {
-  const saved = saveServer({ name: 'VPS', url: 'https://vps.local', dataDir: process.env.AI_MEMORY_DATA_DIR });
+  const saved = await saveServer({ name: 'VPS', url: 'https://vps.local', dataDir: process.env.AI_MEMORY_DATA_DIR });
   const id = saved.servers.find((s) => s.name === 'VPS').id;
-  activateServer(id);
+  await activateServer(id);
   assert.equal(config.serverUrl, 'https://vps.local');
 
   writeZcode();
@@ -145,7 +145,7 @@ test('o destino segue o perfil ativo, não o do ambiente', { skip: !CLI_AVAILABL
   assert.equal(entry.url, 'https://vps.local/mcp', 'a config do harness não seguiu o servidor escolhido');
 
   // e a lista reflete a divergência quando o servidor volta
-  activateServer('local');
+  await activateServer('local');
 });
 
 test('TOML (grok) também é lido e reescrito', { skip: !CLI_AVAILABLE && 'cli do ai-memory não instalada nesta máquina' }, async () => {
